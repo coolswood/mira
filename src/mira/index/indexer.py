@@ -25,6 +25,39 @@ from mira.platforms.fetch import RepoFetcher, make_fetcher
 logger = logging.getLogger(__name__)
 
 
+def _progress_stage(llm: Any, stage: str, detail: str = "", **data: Any) -> None:
+    """Forward an indexing phase to the live progress tracker.
+
+    Keyed off ``llm.progress_key`` (set by callers that registered a job);
+    no-op for CLI usage or when no job was registered. Best-effort: progress
+    must never break indexing.
+    """
+    try:
+        key = getattr(llm, "progress_key", None)
+        if not key:
+            return
+        from mira.core.progress import tracker
+
+        if stage:
+            tracker.set_stage(key, stage, detail)
+        else:
+            tracker.add_event(key, "indexing", detail, **data)
+    except Exception:
+        pass
+
+
+def _progress_files(llm: Any, done: int, total: int) -> None:
+    try:
+        key = getattr(llm, "progress_key", None)
+        if not key:
+            return
+        from mira.core.progress import tracker
+
+        tracker.set_files(key, total, done)
+    except Exception:
+        pass
+
+
 class IndexingCancelled(Exception):
     """Raised by index_repo when a cancel_check callback returns True.
 
@@ -445,6 +478,8 @@ async def index_repo(
         len(indexable) - len(file_pairs) - len(trivial_pairs) - skipped_large,
         skipped_large,
     )
+    _progress_stage(llm, "files", f"{len(file_pairs)} files in LLM batches")
+    _progress_files(llm, len(trivial_pairs), len(file_pairs) + len(trivial_pairs))
 
     # Clean up deleted files
     existing_paths = store.all_paths()
@@ -508,6 +543,7 @@ async def index_repo(
                     indexed_count += 1
                 except Exception as exc:
                     logger.warning("Skipping file %s in %s/%s: %s", path, owner, repo, exc)
+            _progress_files(llm, indexed_count, len(file_pairs) + len(trivial_pairs))
     except IndexingCancelled:
         raise
 
@@ -558,6 +594,7 @@ async def index_repo(
         logger.debug("Failed to schedule vuln poll for %s/%s: %s", owner, repo, exc)
 
     # Directory summarization pass
+    _progress_stage(llm, "directories", "generating directory summaries")
     await _summarize_directories(store, llm, llm_sem)
 
     logger.info("Indexing complete: %d files indexed for %s/%s", indexed_count, owner, repo)

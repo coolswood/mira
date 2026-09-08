@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { useNavigate } from "react-router"
 import {
   Area,
@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/table"
 import { api, type OrgLearnedRuleModel } from "@/lib/api"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
+import { JobProgressCard } from "@/components/dashboard/job-progress-card"
 
 export function DashboardPage() {
   useDocumentTitle("Dashboard")
@@ -58,23 +59,6 @@ export function DashboardPage() {
     () => api.listLearnedRules("pending").catch(() => []),
     [],
   )
-
-  const [indexingJobs, setIndexingJobs] = useState<
-    { repo: string; status: string; files_done: number; started_at: number }[]
-  >([])
-
-  // Poll fast (3s) when something is indexing, slow (30s) when idle.
-  const hasActiveJob = indexingJobs.some((j) => j.status === "indexing")
-  useEffect(() => {
-    const poll = () => {
-      api.getIndexingStatus().then(setIndexingJobs).catch(() => {})
-    }
-    poll()
-    const interval = setInterval(poll, hasActiveJob ? 3000 : 30000)
-    return () => clearInterval(interval)
-  }, [hasActiveJob])
-
-  const activeJobs = indexingJobs.filter((j) => j.status === "indexing")
 
   const rs = stats?.review_stats
 
@@ -104,27 +88,8 @@ export function DashboardPage() {
         </p>
       </div>
 
-      {/* Indexing status */}
-      {activeJobs.length > 0 && (
-        <Card className="relative overflow-hidden border-primary/30 bg-primary/5">
-          {/* Shimmer bar */}
-          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary to-transparent [background-size:200%_100%] [animation:shimmer_2s_linear_infinite]" />
-          <CardContent className="flex items-center gap-4 p-4">
-            <div className="relative flex h-8 w-8 items-center justify-center">
-              <div className="absolute inset-1 rounded-full border-2 border-primary/40 border-t-primary [animation:spin_1s_linear_infinite]" />
-            </div>
-            <div className="flex-1">
-              <p className="text-sm font-medium">
-                Indexing {activeJobs.length}{" "}
-                {activeJobs.length === 1 ? "repository" : "repositories"}
-              </p>
-              <p className="truncate text-xs text-muted-foreground">
-                {activeJobs.map((j) => j.repo).join(", ")}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* Live progress: running reviews + indexing, fed by SSE */}
+      <JobProgressCard />
 
       {/* Stat cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

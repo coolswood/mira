@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import signal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -36,6 +37,7 @@ class TestCodexCLIProvider:
             "--output-last-message",
             "/tmp/out.txt",
             "--ephemeral",
+            "--json",
             "--ignore-user-config",
             "--ignore-rules",
             "-c",
@@ -115,7 +117,9 @@ class TestCodexCLIProvider:
     @pytest.mark.asyncio
     async def test_complete_json_mode_returns_json_only(self):
         provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
-        provider._run_codex = AsyncMock(return_value='text before {"ok": true} text after')  # type: ignore[method-assign]
+        provider._run_codex = AsyncMock(  # type: ignore[method-assign]
+            return_value=('text before {"ok": true} text after', {})
+        )
 
         result = await provider.complete([{"role": "user", "content": "return json"}])
 
@@ -127,7 +131,9 @@ class TestCodexCLIProvider:
     @pytest.mark.asyncio
     async def test_complete_json_mode_counts_extracted_response_tokens(self):
         provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
-        provider._run_codex = AsyncMock(return_value='text before {"ok": true} text after')  # type: ignore[method-assign]
+        provider._run_codex = AsyncMock(  # type: ignore[method-assign]
+            return_value=('text before {"ok": true} text after', {})
+        )
         provider.count_tokens = lambda text: len(text)  # type: ignore[method-assign]
 
         result = await provider.complete([{"role": "user", "content": "return json"}])
@@ -138,7 +144,9 @@ class TestCodexCLIProvider:
     @pytest.mark.asyncio
     async def test_complete_with_tools_prompts_for_tool_arguments_json(self):
         provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
-        provider._run_codex = AsyncMock(return_value='{"comments": [], "summary": "ok"}')  # type: ignore[method-assign]
+        provider._run_codex = AsyncMock(  # type: ignore[method-assign]
+            return_value=('{"comments": [], "summary": "ok"}', {})
+        )
         tool = {
             "type": "function",
             "function": {
@@ -166,19 +174,202 @@ class TestCodexCLIProvider:
     async def test_subprocess_starts_in_an_isolated_process_group(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        proc = AsyncMock()
-        proc.returncode = 0
-        proc.communicate.return_value = (b'{"ok": true}', b"")
+        proc = self._fake_codex_proc(
+            events=[{"type": "turn.completed", "usage": {"output_tokens": 1}}]
+        )
         spawn = AsyncMock(return_value=proc)
         monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
         provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
 
-        result = await provider._run_codex("return JSON")
+        result, usage = await provider._run_codex("return JSON")
 
-        assert result == '{"ok": true}'
+        assert result == ""
+        # Usage is normalized to the full four-key shape the tracker uses.
+        assert usage == {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 1,
+            "reasoning_output_tokens": 0,
+        }
         await_args = spawn.await_args
         assert await_args is not None
         assert await_args.kwargs["start_new_session"] is True
+
+    # ── exec --json event stream ───────────────────────────────────
+
+    @staticmethod
+    def _reader(lines: list[bytes]) -> asyncio.StreamReader:
+        reader = asyncio.StreamReader()
+        for line in lines:
+            reader.feed_data(line)
+        reader.feed_eof()
+        return reader
+
+    @staticmethod
+    def _fake_codex_proc(
+        events: list[dict],
+        last_message: str = "",
+        exit_code: int = 0,
+    ) -> MagicMock:
+        """A fake codex exec process whose stdout carries a --json stream."""
+        import json as _json
+
+        proc = MagicMock()
+        proc.stdout = TestCodexCLIProvider._reader(
+            [_json.dumps(e).encode() + b"\n" for e in events]
+        )
+        stderr = asyncio.StreamReader()
+        stderr.feed_eof()
+        proc.stderr = stderr
+
+        class _Stdin:
+            def __init__(self) -> None:
+                self.data = b""
+                self.eof = False
+                self.closed = False
+
+            def write(self, data: bytes) -> None:
+                self.data += data
+
+            async def drain(self) -> None:
+                pass
+
+            def close(self) -> None:
+                self.closed = True
+
+            async def wait_closed(self) -> None:
+                self.eof = True
+
+        proc.stdin = _Stdin()
+        proc.wait = AsyncMock(return_value=exit_code)
+        proc.returncode = exit_code
+        proc.last_message = last_message
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_run_codex_parses_stream_and_reports_exact_usage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        events = [
+            {"type": "thread.started", "thread_id": "t-1"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "reasoning"}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "not final"}},
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": '{"ok": true}'},
+            },
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 40,
+                    "output_tokens": 7,
+                    "reasoning_output_tokens": 3,
+                },
+            },
+        ]
+        proc = self._fake_codex_proc(events)
+        spawn = AsyncMock(return_value=proc)
+        monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
+
+        text, usage = await provider._run_codex("prompt")
+
+        # No last-message file exists in the fake run — the stream fallback wins.
+        assert text == '{"ok": true}'
+        assert usage == {
+            "input_tokens": 100,
+            "cached_input_tokens": 40,
+            "output_tokens": 7,
+            "reasoning_output_tokens": 3,
+        }
+        # stdin carried the prompt and was closed.
+        assert proc.stdin.data == b"prompt"
+        assert proc.stdin.closed
+
+    @pytest.mark.asyncio
+    async def test_exact_usage_feeds_token_accounting(self, monkeypatch: pytest.MonkeyPatch):
+        events = [
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": '{"ok": true}'},
+            },
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 500, "output_tokens": 25},
+            },
+        ]
+        monkeypatch.setattr(
+            "asyncio.create_subprocess_exec", AsyncMock(return_value=self._fake_codex_proc(events))
+        )
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
+
+        await provider.complete([{"role": "user", "content": "hi"}])
+
+        assert provider.total_prompt_tokens == 500
+        assert provider.total_completion_tokens == 25
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_raises_with_stderr_detail(self, monkeypatch: pytest.MonkeyPatch):
+        proc = self._fake_codex_proc([{"type": "turn.started"}], exit_code=1)
+        monkeypatch.setattr("asyncio.create_subprocess_exec", AsyncMock(return_value=proc))
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
+
+        with pytest.raises(LLMError, match="exit 1"):
+            await provider._run_codex("prompt")
+
+    @pytest.mark.asyncio
+    async def test_call_events_are_published_to_progress_tracker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from mira.core import progress as progress_module
+
+        events = [
+            {"type": "item.completed", "item": {"type": "reasoning"}},
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": '{"ok": true}'},
+            },
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            },
+        ]
+        monkeypatch.setattr(
+            "asyncio.create_subprocess_exec", AsyncMock(return_value=self._fake_codex_proc(events))
+        )
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
+        provider.progress_key = "acme/widget#7"
+        progress_module.tracker.begin(
+            "acme/widget#7", progress_module.REVIEW, "acme/widget", pr_number=7
+        )
+
+        await provider._run_codex("prompt")
+
+        job = progress_module.tracker.get("acme/widget#7")
+        assert job is not None
+        assert job.calls_started == 1
+        assert job.calls_in_flight == 0
+        assert job.tokens_input == 10
+        assert job.tokens_output == 2
+        assert job.items == {"reasoning": 1, "agent_message": 1}
+
+    @pytest.mark.asyncio
+    async def test_stream_noise_and_non_json_lines_are_tolerated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        proc = self._fake_codex_proc([])
+        # Prepend garbage lines to the stream.
+        noisy = self._reader([b"not json\n", b'{"truncated\n', b"  \n"])
+        proc.stdout = noisy
+        monkeypatch.setattr("asyncio.create_subprocess_exec", AsyncMock(return_value=proc))
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
+
+        text, usage = await provider._run_codex("prompt")
+
+        assert text == ""
+        assert usage == {}
 
     @pytest.mark.asyncio
     async def test_process_group_exit_race_does_not_rekill_direct_child(
@@ -217,7 +408,9 @@ class TestCodexCLIProvider:
     @pytest.mark.asyncio
     async def test_complete_agentic_defers_without_starting_a_second_cli_review(self):
         provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
-        provider._run_codex = AsyncMock(return_value='{"comments": []}')  # type: ignore[method-assign]
+        provider._run_codex = AsyncMock(  # type: ignore[method-assign]
+            return_value=('{"comments": []}', {})
+        )
 
         msg = await provider.complete_agentic([{"role": "user", "content": "hi"}], tools=[])
 

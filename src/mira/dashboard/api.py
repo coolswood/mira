@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from collections.abc import Generator
@@ -332,6 +333,47 @@ class IndexStatusModel(BaseModel):
     error: str
 
 
+class JobProgressEventModel(BaseModel):
+    ts: float
+    kind: str
+    message: str
+    data: dict = {}
+
+
+class JobProgressModel(BaseModel):
+    """Live snapshot of a long-running job (review or indexing)."""
+
+    key: str
+    kind: str
+    repo: str
+    pr_number: int = 0
+    pr_title: str = ""
+    pr_url: str = ""
+    status: str
+    stage: str
+    review_round: int = 1
+    files_total: int = 0
+    files_done: int = 0
+    chunks_total: int = 0
+    chunks_done: int = 0
+    calls_started: int = 0
+    calls_in_flight: int = 0
+    calls_failed: int = 0
+    calls_by_stage: dict = {}
+    tokens_input: int = 0
+    tokens_cached: int = 0
+    tokens_output: int = 0
+    tokens_reasoning: int = 0
+    items: dict = {}
+    started_at: float = 0.0
+    updated_at: float = 0.0
+    finished_at: float = 0.0
+    elapsed_s: float = 0.0
+    eta_s: float | None = None
+    error: str = ""
+    events: list[JobProgressEventModel] = []
+
+
 class GitLabRepoRegister(BaseModel):
     project: str  # "group/project" or "group/subgroup/project"
 
@@ -528,8 +570,14 @@ async def _run_initial_indexing(default_mode: str) -> None:
             logger.warning("Skipping initial index of %s — no %s token", full_name, platform)
             continue
         try:
+            from mira.core.progress import INDEXING, indexing_key
+            from mira.core.progress import tracker as progress_tracker
+
             _app_db.set_repo_status(owner, repo, "indexing", platform=platform)
             tracker.start(full_name)
+            progress_key = indexing_key(owner, repo)
+            progress_tracker.begin(progress_key, INDEXING, full_name)
+            llm.progress_key = progress_key  # type: ignore[attr-defined]
             store = IndexStore.open(owner, repo, platform=platform)
             count = await index_repo(
                 owner=owner,
@@ -540,6 +588,8 @@ async def _run_initial_indexing(default_mode: str) -> None:
                 llm=llm,
                 full=(repo_record.index_mode == "full"),
             )
+            progress_tracker.finish(progress_key)
+            llm.progress_key = None  # type: ignore[attr-defined]
             # `count` is files re-indexed this run, not the store total.
             # Read the true total before closing to keep the DB in sync.
             total_files = len(store.all_paths())
@@ -560,9 +610,13 @@ async def _run_initial_indexing(default_mode: str) -> None:
         except EmptyRepoError as empty:
             _app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
             tracker.complete(full_name, 0)
+            with contextlib.suppress(Exception):
+                progress_tracker.finish(progress_key)
         except Exception as exc:
             _app_db.set_repo_status(owner, repo, "failed", error=str(exc), platform=platform)
             tracker.fail(full_name, str(exc))
+            with contextlib.suppress(Exception):
+                progress_tracker.fail(progress_key, str(exc)[:500])
             logger.exception("Failed to index %s", full_name)
 
 
