@@ -16,6 +16,8 @@ from mira.index.manifests import (
     parse_manifest,
     parse_package_json,
     parse_package_lock_json,
+    parse_pubspec_lock,
+    parse_pubspec_yaml,
     parse_pyproject_toml,
     parse_requirements_txt,
     parse_uv_lock,
@@ -454,3 +456,98 @@ class TestPreferResolved:
         ]
         result = _prefer_resolved(rows)
         assert len(result) == 2
+
+
+class TestPubspecYaml:
+    def test_hosted_dependencies(self):
+        content = """\
+name: my_app
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dio: ^5.4.0
+  provider: 6.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  build_runner: ^2.4.0
+"""
+        pkgs = parse_pubspec_yaml(content, "pubspec.yaml")
+        by_name = {p.name: p for p in pkgs}
+        # sdk deps carry no version → skipped
+        assert "flutter" not in by_name
+        assert "flutter_test" not in by_name
+        assert by_name["dio"].version == "^5.4.0"
+        assert by_name["provider"].version == "6.1.1"
+        assert by_name["provider"].kind == "pub"
+        assert by_name["build_runner"].is_dev is True
+        assert by_name["dio"].is_dev is False
+
+    def test_hosted_map_form(self):
+        content = """\
+dependencies:
+  dio:
+    version: ^5.0.0
+"""
+        pkgs = parse_pubspec_yaml(content, "pubspec.yaml")
+        assert [p.name for p in pkgs] == ["dio"]
+        assert pkgs[0].version == "^5.0.0"
+
+    def test_invalid_yaml(self):
+        assert parse_pubspec_yaml("dependencies: [unclosed", "pubspec.yaml") == []
+
+    def test_is_manifest_and_lockfile_heuristic(self):
+        assert is_manifest("pubspec.yaml")
+        assert is_manifest("app/pubspec.lock")
+        assert _is_lockfile_path("pubspec.lock")
+        assert not _is_lockfile_path("pubspec.yaml")
+
+
+class TestPubspecLock:
+    def test_resolved_versions(self):
+        content = """\
+packages:
+  dio:
+    dependency: "direct main"
+    description:
+      name: dio
+      sha256: abc123
+      source: hosted
+      url: "https://pub.dev"
+    source: hosted
+    version: "5.4.0"
+  build_runner:
+    dependency: "direct dev"
+    description:
+      name: build_runner
+      source: hosted
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.4.7"
+  http_parser:
+    dependency: transitive
+    description:
+      name: http_parser
+      source: hosted
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.0.2"
+sdks:
+  dart: ">=3.0.0 <4.0.0"
+"""
+        pkgs = parse_pubspec_lock(content, "pubspec.lock")
+        by_name = {p.name: p for p in pkgs}
+        assert by_name["dio"].version == "5.4.0"
+        assert by_name["dio"].kind == "pub"
+        assert by_name["dio"].is_dev is False
+        assert by_name["build_runner"].is_dev is True
+        # transitive kept — CVEs usually hide there
+        assert by_name["http_parser"].version == "4.0.2"
+        assert "sdks" not in by_name
+
+    def test_empty_packages(self):
+        assert parse_pubspec_lock("packages: {}", "pubspec.lock") == []
