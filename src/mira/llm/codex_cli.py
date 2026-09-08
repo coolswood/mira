@@ -164,17 +164,38 @@ class CodexCLIProvider:
                     "codex_command_not_found", command=self.config.codex_command
                 ) from exc
 
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            communicate_task = asyncio.ensure_future(proc.communicate(prompt.encode("utf-8")))
+
+            async def _heartbeat() -> None:
+                """Emit a liveness line while the call runs — codex exec is
+                silent on stdout, so without this a long reasoning call looks
+                like a hang in the logs."""
+                while True:
+                    await asyncio.sleep(30)
+                    logger.info(
+                        "codex call in progress: %ds elapsed (timeout %ds)",
+                        int(loop.time() - started),
+                        self.config.codex_timeout_seconds,
+                    )
+
+            heartbeat = asyncio.ensure_future(_heartbeat())
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(prompt.encode("utf-8")),
+                    communicate_task,
                     timeout=self.config.codex_timeout_seconds,
                 )
             except TimeoutError as exc:
+                heartbeat.cancel()
                 await self._terminate_process_tree(proc)
                 raise LLMError("codex_timeout", seconds=self.config.codex_timeout_seconds) from exc
             except BaseException:
+                heartbeat.cancel()
                 await self._terminate_process_tree(proc)
                 raise
+            heartbeat.cancel()
+            logger.info("codex call finished in %ds", int(loop.time() - started))
 
             stdout_text = stdout.decode("utf-8", errors="replace")
             stderr_text = stderr.decode("utf-8", errors="replace")
