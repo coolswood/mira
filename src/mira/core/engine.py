@@ -65,6 +65,17 @@ from mira.security.secrets_scan import scan_secrets
 logger = logging.getLogger(__name__)
 
 
+def _progress_key(pr_info: PRInfo | None) -> str | None:
+    """Live-progress job key for the PR being reviewed, if known.
+
+    None (CLI review_diff path, tests) simply no-ops every tracker call —
+    the tracker treats unknown keys as no-ops by design.
+    """
+    if pr_info is None:
+        return None
+    return f"{pr_info.owner}/{pr_info.repo}#{pr_info.number}"
+
+
 def _audit_drop(c: ReviewComment, stage: str, reason: str = "") -> dict:
     """Audit entry for a comment removed by a pipeline stage."""
     return {
@@ -867,6 +878,12 @@ class ReviewEngine:
         )
 
         posted_comment_ids: list[int] = []
+        if getattr(self, "_pr_info", None) is not None:
+            from mira.core.progress import tracker as _progress_tracker
+
+            _progress_tracker.set_stage(
+                _progress_key(self._pr_info), "posting", f"{len(result.comments)} comment(s)"
+            )
         if result.comments:
             if self.dry_run:
                 logger.info(
@@ -1048,6 +1065,11 @@ class ReviewEngine:
                 skipped_reason="All files exceeded size limits or were deprioritized.",
             )
 
+        from mira.core.progress import tracker as progress_tracker
+
+        p_key = _progress_key(getattr(self, "_pr_info", None))
+        progress_tracker.set_files(p_key, len(selected))
+
         all_paths = [f.path for f in filtered]
         selected_paths = [f.path for f in selected]
         skipped_paths_only = [p for p, _reason in skipped]
@@ -1189,6 +1211,7 @@ class ReviewEngine:
             return ""
 
         # Fire walkthrough early so review_pr can post it before chunk review finishes.
+        progress_tracker.set_stage(p_key, "walkthrough", f"{len(filtered)} files in diff")
         walkthrough_task = _asyncio.create_task(_generate_walkthrough())
 
         # `_walkthrough_notify_task` exposed on self so review_pr can await it
@@ -1232,6 +1255,8 @@ class ReviewEngine:
             max_tokens=self.config.llm.max_context_tokens,
             provider=self.llm,
         )
+        progress_tracker.set_stage(p_key, "review")
+        progress_tracker.plan_chunks(p_key, len(chunks))
 
         learned_rules: list[str] = []
         custom_rules: list[dict[str, str]] = []
@@ -1279,6 +1304,10 @@ class ReviewEngine:
                     len(chunks),
                     len(chunk.files),
                 )
+                chunk_started = _asyncio.get_event_loop().time()
+                progress_tracker.chunk_started(p_key, idx + 1, len(chunk.files))
+                comments: list[ReviewComment] = []
+                chunk_failed = False
                 try:
                     chunk_history = {
                         f.path: file_history[f.path] for f in chunk.files if f.path in file_history
@@ -1390,7 +1419,18 @@ class ReviewEngine:
                         len(chunks),
                         exc,
                     )
+                    chunk_failed = True
                     return [], [], ""
+                finally:
+                    progress_tracker.chunk_finished(
+                        p_key, idx + 1, comments=len(comments), ok=not chunk_failed
+                    )
+                    logger.debug(
+                        "Chunk %d/%d took %ds",
+                        idx + 1,
+                        len(chunks),
+                        int(_asyncio.get_event_loop().time() - chunk_started),
+                    )
 
         review_task = _asyncio.gather(*[_review_chunk(i, c) for i, c in enumerate(chunks)])
         # Per-chunk executors (fresh per call) so each chunk gets its own
@@ -1537,6 +1577,9 @@ class ReviewEngine:
             # drops the finding. Add those manifests back as evidence only.
             _selected = {f.path for f in filtered}
             critique_files = filtered + [f for f in manifest_candidates if f.path not in _selected]
+            progress_tracker.set_stage(
+                p_key, "critique", f"verifying {len(final_comments)} finding(s)"
+            )
             try:
                 final_comments = await self_critique(
                     self.llm,
@@ -1556,6 +1599,7 @@ class ReviewEngine:
             original_summary = " ".join(summaries) if summaries else ""
             # Regenerate from the FINAL filed outputs so summary prose can't
             # claim issues that were dropped by the filter/critique passes.
+            progress_tracker.set_stage(p_key, "summary")
             try:
                 summary = await regenerate_summary(
                     self.llm,

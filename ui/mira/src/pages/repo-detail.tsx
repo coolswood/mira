@@ -25,6 +25,7 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { DependenciesTable } from "@/components/dashboard/dependencies-table"
+import { JobProgressCard } from "@/components/dashboard/job-progress-card"
 import { api, type ReviewContextModel } from "@/lib/api"
 import { useAsync, useDocumentTitle } from "@/lib/hooks"
 
@@ -248,6 +249,9 @@ export function RepoDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Live progress (running reviews / indexing on this repo), fed by SSE */}
+      <JobProgressCard repo={`${data.owner}/${data.repo}`} showRecent />
 
       {/* Indexing status */}
       {indexStatus && (

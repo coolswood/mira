@@ -6,6 +6,7 @@
 import { activityApi } from "./api/activity"
 import { contributorsApi } from "./api/contributors"
 import { packagesApi } from "./api/packages"
+import { progressApi } from "./api/progress"
 import { relationshipsApi } from "./api/relationships"
 import { reposApi } from "./api/repos"
 import { reviewInsightsApi } from "./api/review-insights"
@@ -33,4 +34,5 @@ export const api = {
   ...webhooksApi,
   ...contributorsApi,
   ...reviewInsightsApi,
+  ...progressApi,
 }

@@ -26,6 +26,23 @@ from mira.exceptions import LLMError
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_exec_event(raw: bytes | str) -> dict | None:
+    """Parse one ``codex exec --json`` JSONL line into an event dict.
+
+    Returns None for blank lines, non-JSON noise, or non-object payloads —
+    the stream is best-effort telemetry and must never break the call.
+    """
+    line = (raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw).strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        data = json.loads(line)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 _SAFE_ENV_KEYS = frozenset(
     {
         "PATH",
@@ -59,6 +76,12 @@ class CodexCLIProvider:
         self.config = config
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        # Progress attribution: when set (by webhook handlers / indexing
+        # callers) to a ProgressTracker job key, call-level events are
+        # published to the dashboard's live progress view. Callers using
+        # other providers may set the same attribute; only this provider
+        # consumes it.
+        self.progress_key: str | None = None
 
     @property
     def usage(self) -> dict[str, int]:
@@ -108,6 +131,7 @@ class CodexCLIProvider:
             "--output-last-message",
             output_path,
             "--ephemeral",
+            "--json",
             "--ignore-user-config",
             "--ignore-rules",
             "-c",
@@ -141,7 +165,15 @@ class CodexCLIProvider:
         retry=retry_if_exception_type(LLMError),
         reraise=True,
     )
-    async def _run_codex(self, prompt: str) -> str:
+    async def _run_codex(self, prompt: str) -> tuple[str, dict[str, int]]:
+        """Run one codex exec call; return (final text, token usage).
+
+        stdout is a JSONL event stream (``--json``): thread/turn/item events
+        ending in ``turn.completed`` with exact token usage. Events are parsed
+        as they arrive — both for liveness logging and, when ``progress_key``
+        is set, for the dashboard's live progress view. The final message file
+        (``--output-last-message``) stays the primary result channel.
+        """
         with tempfile.TemporaryDirectory(prefix="mira-codex-") as tmpdir:
             output_path = str(Path(tmpdir) / "last-message.txt")
             runtime_home = str(Path(tmpdir) / "runtime")
@@ -164,14 +196,95 @@ class CodexCLIProvider:
                     "codex_command_not_found", command=self.config.codex_command
                 ) from exc
 
+            assert proc.stdin is not None
+            assert proc.stdout is not None
+            assert proc.stderr is not None
+            # Local bindings: the asserts above don't narrow inside closures.
+            proc_stdin = proc.stdin
+            proc_stdout = proc.stdout
+            proc_stderr = proc.stderr
+
             loop = asyncio.get_running_loop()
             started = loop.time()
-            communicate_task = asyncio.ensure_future(proc.communicate(prompt.encode("utf-8")))
+            progress_key = self.progress_key
+            if progress_key:
+                from mira.core.progress import tracker
+
+                tracker.call_started(progress_key)
+
+            stderr_chunks: list[bytes] = []
+
+            async def _drain_stderr() -> None:
+                async for chunk in proc_stderr:
+                    stderr_chunks.append(chunk)
+
+            async def _write_stdin() -> None:
+                """Feed the prompt and close stdin.
+
+                Runs concurrently with stdout pumping: a multi-megabyte chunk
+                prompt overflows the pipe buffer, so writing must not wait for
+                the pump to finish first. The explicit close matters — without
+                it codex waits for stdin EOF forever and the call dies at the
+                timeout.
+                """
+                try:
+                    proc_stdin.write(prompt.encode("utf-8"))
+                    await proc_stdin.drain()
+                    proc_stdin.close()
+                    await proc_stdin.wait_closed()
+                except Exception:
+                    pass
+
+            async def _pump_stdout() -> tuple[str, dict[str, int]]:
+                """Consume exec --json events until EOF.
+
+                Returns (last agent_message text, usage from turn.completed).
+                """
+                agent_text = ""
+                usage: dict[str, int] = {}
+                while True:
+                    raw = await proc_stdout.readline()
+                    if not raw:
+                        break
+                    event = _parse_exec_event(raw)
+                    if event is None:
+                        continue
+                    event_type = event.get("type", "")
+                    if event_type == "item.completed":
+                        item = event.get("item") or {}
+                        item_type = item.get("type", "")
+                        if item_type == "agent_message" and item.get("text"):
+                            agent_text = item["text"]
+                        if item_type:
+                            logger.debug("codex item completed: %s", item_type)
+                            if progress_key:
+                                tracker.call_item(progress_key, str(item_type))
+                    elif event_type == "turn.completed":
+                        raw_usage = event.get("usage") or {}
+                        usage = {
+                            key: int(raw_usage.get(key) or 0)
+                            for key in (
+                                "input_tokens",
+                                "cached_input_tokens",
+                                "output_tokens",
+                                "reasoning_output_tokens",
+                            )
+                        }
+                        if progress_key:
+                            tracker.call_usage(progress_key, **usage)
+                    elif event_type in ("turn.failed", "thread.failed", "error"):
+                        logger.warning(
+                            "codex stream error event (%s): %s",
+                            event_type,
+                            str(event.get("message") or event.get("error") or event)[:500],
+                        )
+                    elif event_type == "thread.started":
+                        logger.debug("codex thread started: %s", event.get("thread_id", ""))
+                return agent_text, usage
 
             async def _heartbeat() -> None:
-                """Emit a liveness line while the call runs — codex exec is
-                silent on stdout, so without this a long reasoning call looks
-                like a hang in the logs."""
+                """Emit a liveness line while the call runs — reasoning-heavy
+                calls can go minutes between stream events."""
                 while True:
                     await asyncio.sleep(30)
                     logger.info(
@@ -180,37 +293,80 @@ class CodexCLIProvider:
                         self.config.codex_timeout_seconds,
                     )
 
+            stderr_task = asyncio.ensure_future(_drain_stderr())
+            stdin_task = asyncio.ensure_future(_write_stdin())
             heartbeat = asyncio.ensure_future(_heartbeat())
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    communicate_task,
+                agent_text, usage = await asyncio.wait_for(
+                    _pump_stdout(),
                     timeout=self.config.codex_timeout_seconds,
                 )
+                try:
+                    exit_code = await asyncio.wait_for(proc.wait(), timeout=30)
+                except TimeoutError:
+                    await self._terminate_process_tree(proc)
+                    exit_code = await proc.wait()
             except TimeoutError as exc:
                 heartbeat.cancel()
                 await self._terminate_process_tree(proc)
+                if progress_key:
+                    tracker.call_finished(
+                        progress_key, ok=False, duration_s=loop.time() - started, error="timeout"
+                    )
                 raise LLMError("codex_timeout", seconds=self.config.codex_timeout_seconds) from exc
-            except BaseException:
+            except BaseException as exc:
                 heartbeat.cancel()
                 await self._terminate_process_tree(proc)
+                if progress_key:
+                    tracker.call_finished(
+                        progress_key,
+                        ok=False,
+                        duration_s=loop.time() - started,
+                        error=type(exc).__name__,
+                    )
                 raise
-            heartbeat.cancel()
-            logger.info("codex call finished in %ds", int(loop.time() - started))
+            finally:
+                heartbeat.cancel()
+                # A task that never got scheduled completes via cancel() with
+                # CancelledError, which is BaseException — suppress it too.
+                for task in (stderr_task, stdin_task):
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
 
-            stdout_text = stdout.decode("utf-8", errors="replace")
-            stderr_text = stderr.decode("utf-8", errors="replace")
+            duration = loop.time() - started
+            if progress_key:
+                tracker.call_finished(progress_key, ok=exit_code == 0, duration_s=duration)
+            self._log_call_finished(duration, usage)
+
+            stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
             output_file = Path(output_path)
             last_message = output_file.read_text(encoding="utf-8") if output_file.exists() else ""
 
-            if proc.returncode != 0:
-                detail = (stderr_text or stdout_text or last_message).strip()
+            if exit_code != 0:
+                detail = (stderr_text or agent_text or last_message).strip()
                 raise LLMError(
                     "codex_exit_failed",
-                    exit_code=proc.returncode,
+                    exit_code=exit_code,
                     detail=detail[-2000:],
                 )
 
-            return (last_message or stdout_text).strip()
+            return ((last_message or agent_text) or "").strip(), usage
+
+    @staticmethod
+    def _log_call_finished(duration_s: float, usage: dict[str, int]) -> None:
+        """One log line per finished call: duration plus real token spend."""
+        if usage:
+            logger.info(
+                "codex call finished in %ds (tokens: %d in / %d cached / %d out / %d reasoning)",
+                int(duration_s),
+                usage.get("input_tokens", 0),
+                usage.get("cached_input_tokens", 0),
+                usage.get("output_tokens", 0),
+                usage.get("reasoning_output_tokens", 0),
+            )
+        else:
+            logger.info("codex call finished in %ds", int(duration_s))
 
     def _messages_prompt(self, messages: list[dict]) -> str:
         parts = [
@@ -285,6 +441,17 @@ class CodexCLIProvider:
 
         raise LLMError("codex_no_json_object", excerpt=candidate[:1000])
 
+    def _account_usage(self, prompt: str, result: str, usage: dict[str, int]) -> None:
+        """Track token spend. Prefers the exact usage reported by the codex
+        event stream; falls back to the chars/4 heuristic when a call died
+        before ``turn.completed``."""
+        if usage:
+            self.total_prompt_tokens += usage.get("input_tokens", 0)
+            self.total_completion_tokens += usage.get("output_tokens", 0)
+        else:
+            self.total_prompt_tokens += self.count_tokens(prompt)
+            self.total_completion_tokens += self.count_tokens(result)
+
     async def complete(
         self,
         messages: list[dict[str, str]],
@@ -298,10 +465,9 @@ class CodexCLIProvider:
                 "\n\n## Required output\n"
                 "Return ONLY one valid JSON object. No markdown fences or explanatory text."
             )
-        raw = await self._run_codex(prompt)
-        self.total_prompt_tokens += self.count_tokens(prompt)
+        raw, usage = await self._run_codex(prompt)
         result = self._extract_json_object(raw) if json_mode else raw
-        self.total_completion_tokens += self.count_tokens(result)
+        self._account_usage(prompt, result, usage)
         return result
 
     async def complete_with_tools(
@@ -311,10 +477,9 @@ class CodexCLIProvider:
         temperature: float | None = None,
     ) -> str:
         prompt = self._tool_prompt(messages, tools)
-        raw = await self._run_codex(prompt)
-        self.total_prompt_tokens += self.count_tokens(prompt)
+        raw, usage = await self._run_codex(prompt)
         result = self._extract_json_object(raw)
-        self.total_completion_tokens += self.count_tokens(result)
+        self._account_usage(prompt, result, usage)
         return result
 
     async def complete_agentic(

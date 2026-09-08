@@ -41,6 +41,15 @@ async def run_incremental_index(
     from mira.dashboard.models_config import llm_config_for
 
     llm = create_llm(llm_config_for("indexing", config.llm))
+    progress_key = None
+    try:
+        from mira.core.progress import INDEXING, indexing_key, tracker
+
+        progress_key = indexing_key(owner, repo)
+        tracker.begin(progress_key, INDEXING, f"{owner}/{repo}")
+    except Exception:
+        pass
+    llm.progress_key = progress_key  # type: ignore[attr-defined]
     store = IndexStore.open(owner, repo, platform=platform)
 
     total_affected = len(changed_paths) + len(removed_paths)
@@ -73,6 +82,13 @@ async def run_incremental_index(
             branch=default_branch,
             fetcher=fetcher,
         )
+    if progress_key:
+        try:
+            from mira.core.progress import tracker
+
+            tracker.finish(progress_key)
+        except Exception:
+            pass
 
     # ``count`` is the number of files re-indexed *this run*, not the total
     # in the store. For incremental runs that's a small subset (e.g. 3 of 120),
