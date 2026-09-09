@@ -21,6 +21,11 @@ def create_llm(config: LLMConfig) -> LLMProviderProtocol:
 
         return CodexCLIProvider(config)
 
+    if config.provider in {"antigravity", "antigravity-cli", "antigravity_cli", "agy"}:
+        from mira.llm.antigravity_cli import AntigravityCLIProvider
+
+        return AntigravityCLIProvider(config)
+
     if config.api_style == "responses":
         from mira.llm.responses import ResponsesProvider
 

@@ -123,6 +123,43 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         full="Codex CLI response did not contain a JSON object: {excerpt}",
         safe="Codex CLI response did not contain a JSON object",
     ),
+    # Antigravity CLI provider errors
+    "antigravity_home_missing": ErrorMessage(
+        full="Antigravity home directory not found: {path}",
+        safe="Antigravity home directory not found",
+    ),
+    "antigravity_command_not_found": ErrorMessage(
+        full="Antigravity CLI command not found: {command!r}. Install the Antigravity CLI or set llm.antigravity_command.",
+        safe="Antigravity CLI command not found — install the Antigravity CLI or set llm.antigravity_command",
+    ),
+    "antigravity_timeout": ErrorMessage(
+        full="Antigravity CLI timed out after {seconds}s",
+        safe="Antigravity CLI timed out",
+    ),
+    "antigravity_exit_failed": ErrorMessage(
+        full="Antigravity CLI failed with exit {exit_code}: {detail}",
+        safe="Antigravity CLI failed",
+    ),
+    "antigravity_result_failed": ErrorMessage(
+        full="Antigravity CLI result status was {status}: {detail}",
+        safe="Antigravity CLI failed",
+    ),
+    "antigravity_empty_response": ErrorMessage(
+        full="Antigravity CLI returned an empty response",
+        safe="Antigravity CLI returned an empty response",
+    ),
+    "antigravity_non_object_json": ErrorMessage(
+        full="Antigravity CLI response must be a JSON object, got {type}",
+        safe="Antigravity CLI response must be a JSON object",
+    ),
+    "antigravity_malformed_json": ErrorMessage(
+        full="Antigravity CLI returned malformed JSON: {error}: {excerpt}",
+        safe="Antigravity CLI returned malformed JSON",
+    ),
+    "antigravity_no_json_object": ErrorMessage(
+        full="Antigravity CLI response did not contain a JSON object: {excerpt}",
+        safe="Antigravity CLI response did not contain a JSON object",
+    ),
 }
 
 
