@@ -40,6 +40,10 @@ const BACKEND_LABELS: Record<string, string> = {
 // doesn't apply to them.
 const CLI_BACKENDS = new Set(["codex-cli", "antigravity-cli"])
 
+// Sentinel for the compare-provider Select: the active provider is stored as
+// "" in entries, but Radix Select forbids an empty SelectItem value.
+const ACTIVE_PROVIDER = "__active__"
+
 export function SettingsPage() {
   useDocumentTitle("Settings")
   const { user: currentUser } = useAuth()
@@ -542,10 +546,16 @@ export function SettingsPage() {
                       <span className="text-xs font-medium text-muted-foreground">
                         Provider
                       </span>
+                      {/* Radix forbids value="" on SelectItem, and the active
+                          provider is stored as "" — round-trip via a sentinel. */}
                       <Select
-                        value={entry.provider}
+                        value={entry.provider || ACTIVE_PROVIDER}
                         onValueChange={(v) =>
-                          update({ provider: v, model: "", reasoning_effort: "off" })
+                          update({
+                            provider: v === ACTIVE_PROVIDER ? "" : v,
+                            model: "",
+                            reasoning_effort: "off",
+                          })
                         }
                       >
                         <SelectTrigger>
@@ -553,7 +563,10 @@ export function SettingsPage() {
                         </SelectTrigger>
                         <SelectContent>
                           {compareProviders.map((p) => (
-                            <SelectItem key={p.backend} value={p.backend}>
+                            <SelectItem
+                              key={p.backend}
+                              value={p.backend || ACTIVE_PROVIDER}
+                            >
                               {p.label}
                             </SelectItem>
                           ))}
