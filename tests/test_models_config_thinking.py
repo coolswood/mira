@@ -1,9 +1,10 @@
 """Tests for review thinking-mode resolution and the models endpoint.
 
 Covers:
-- `get_review_thinking_mode` precedence and off/empty normalization.
-- `llm_config_for` setting `reasoning_effort` for reviews only, from the DB.
-- `set_models` validating the thinking mode and persisting it.
+- Per-purpose effort resolution (`get_*_thinking_mode`) precedence and
+  off/empty normalization.
+- `llm_config_for` setting `reasoning_effort` per purpose, from the DB.
+- `set_models` validating the thinking modes and persisting them.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ from mira.config import LLMConfig
 from mira.dashboard.api import ModelsUpdate
 from mira.dashboard.db import AppDatabase
 from mira.dashboard.models_config import (
+    get_indexing_thinking_mode,
     get_review_thinking_mode,
+    get_security_thinking_mode,
     llm_config_for,
 )
 from mira.dashboard.routers.admin import set_models
@@ -123,3 +126,118 @@ class TestSetModelsThinkingValidation:
             get_review_thinking_mode(cfg, in_memory_db.get_setting("review_thinking_mode"))
             == "high"
         )
+
+
+class TestGetIndexingThinkingMode:
+    def test_db_value_wins(self):
+        cfg = LLMConfig(indexing_reasoning_effort="low")
+        assert get_indexing_thinking_mode(cfg, "medium") == "medium"
+
+    def test_falls_back_to_config(self):
+        cfg = LLMConfig(indexing_reasoning_effort="low")
+        assert get_indexing_thinking_mode(cfg, None) == "low"
+
+    def test_default_is_none(self):
+        # Indexing stays reasoning-free unless explicitly opted in.
+        assert get_indexing_thinking_mode(LLMConfig(), None) is None
+
+    @pytest.mark.parametrize("db_value", ["off", "", None])
+    def test_off_db_value_does_not_shadow_config(self, db_value: str | None):
+        cfg = LLMConfig(indexing_reasoning_effort="medium")
+        assert get_indexing_thinking_mode(cfg, db_value) == "medium"
+
+
+class TestGetSecurityThinkingMode:
+    def test_own_db_value_wins(self):
+        cfg = LLMConfig(review_reasoning_effort="low")
+        assert get_security_thinking_mode(cfg, "high", "medium") == "high"
+
+    def test_falls_back_to_review_db_setting(self):
+        # Historical behavior: security followed the review mode. Instances
+        # that never touched the new selector keep working exactly as before.
+        assert get_security_thinking_mode(LLMConfig(), None, "xhigh") == "xhigh"
+
+    def test_falls_back_to_security_config_then_review_config(self):
+        assert get_security_thinking_mode(
+            LLMConfig(security_reasoning_effort="medium"), None, None
+        ) == "medium"
+        assert get_security_thinking_mode(
+            LLMConfig(review_reasoning_effort="high"), None, None
+        ) == "high"
+
+    @pytest.mark.parametrize(
+        "own,review",
+        [("off", "off"), ("", "off"), (None, None), ("off", "")],
+    )
+    def test_off_normalizes_to_none(self, own, review):
+        assert get_security_thinking_mode(LLMConfig(), own, review) is None
+
+    def test_review_db_beats_security_yaml(self):
+        # Dashboard settings (DB) sit above mira.yaml across the board.
+        cfg = LLMConfig(security_reasoning_effort="low")
+        assert get_security_thinking_mode(cfg, None, "medium") == "medium"
+
+
+class TestLLMConfigForPerPurposeEffort:
+    def test_indexing_picks_up_its_own_mode(self, in_memory_db: AppDatabase):
+        in_memory_db.set_setting("indexing_thinking_mode", "low")
+        resolved = llm_config_for("indexing", LLMConfig())
+        assert resolved.reasoning_effort == "low"
+
+    def test_indexing_does_not_inherit_review_mode(self, in_memory_db: AppDatabase):
+        in_memory_db.set_setting("review_thinking_mode", "high")
+        resolved = llm_config_for("indexing", LLMConfig())
+        assert resolved.reasoning_effort is None
+
+    def test_security_uses_own_mode_before_review_mode(self, in_memory_db: AppDatabase):
+        in_memory_db.set_setting("review_thinking_mode", "high")
+        in_memory_db.set_setting("security_thinking_mode", "medium")
+        resolved = llm_config_for("security", LLMConfig())
+        assert resolved.reasoning_effort == "medium"
+
+    def test_security_follows_review_mode_when_own_unset(self, in_memory_db: AppDatabase):
+        in_memory_db.set_setting("review_thinking_mode", "high")
+        resolved = llm_config_for("security", LLMConfig())
+        assert resolved.reasoning_effort == "high"
+
+
+class TestSetModelsPerPurposeEffort:
+    def test_persists_all_three_efforts(self, in_memory_db: AppDatabase):
+        body = ModelsUpdate(
+            indexing_model="m1",
+            review_model="m2",
+            security_model="m3",
+            indexing_thinking_mode="low",
+            review_thinking_mode="high",
+            security_thinking_mode="medium",
+        )
+        assert set_models(body, _admin_req()) == {"ok": True}
+        assert in_memory_db.get_setting("indexing_thinking_mode") == "low"
+        assert in_memory_db.get_setting("review_thinking_mode") == "high"
+        assert in_memory_db.get_setting("security_thinking_mode") == "medium"
+
+    def test_off_clears_each_setting(self, in_memory_db: AppDatabase):
+        in_memory_db.set_setting("indexing_thinking_mode", "low")
+        in_memory_db.set_setting("security_thinking_mode", "high")
+        body = ModelsUpdate(
+            indexing_model="m1",
+            review_model="m2",
+            indexing_thinking_mode="off",
+            review_thinking_mode="off",
+            security_thinking_mode="off",
+        )
+        assert set_models(body, _admin_req()) == {"ok": True}
+        assert in_memory_db.get_setting("indexing_thinking_mode") == ""
+        assert in_memory_db.get_setting("review_thinking_mode") == ""
+        assert in_memory_db.get_setting("security_thinking_mode") == ""
+
+    @pytest.mark.parametrize("field", ["indexing_thinking_mode", "security_thinking_mode"])
+    def test_rejects_invalid_per_purpose_mode(self, in_memory_db: AppDatabase, field: str):
+        body = ModelsUpdate(
+            indexing_model="m1",
+            review_model="m2",
+            **{field: "ultra"},
+        )
+        with pytest.raises(HTTPException) as exc:
+            set_models(body, _admin_req())
+        assert exc.value.status_code == 400

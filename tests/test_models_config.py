@@ -92,3 +92,39 @@ class TestLlmConfigForSecurity:
             config = llm_config_for("security", base)
 
         assert config.reasoning_effort == "medium"
+
+
+class TestBackendEffortLevels:
+    """The dashboard effort dropdown is filtered to what the backend honors."""
+
+    def test_cli_backends_offer_up_to_high(self):
+        from mira.dashboard.models_config import thinking_modes_for_backend
+
+        for backend in ("antigravity-cli", "codex-cli"):
+            values = [m["value"] for m in thinking_modes_for_backend(backend)]
+            assert values == ["off", "low", "medium", "high"]
+
+    def test_bedrock_has_no_xhigh(self):
+        from mira.dashboard.models_config import thinking_modes_for_backend
+
+        values = [m["value"] for m in thinking_modes_for_backend("bedrock")]
+        assert values == ["off", "low", "medium", "high", "max"]
+
+    def test_openrouter_offers_everything(self):
+        from mira.dashboard.models_config import thinking_modes_for_backend
+
+        values = [m["value"] for m in thinking_modes_for_backend("openrouter")]
+        assert values == ["off", "low", "medium", "high", "xhigh", "max"]
+
+    def test_unknown_backend_falls_back_to_all(self):
+        from mira.dashboard.models_config import thinking_modes_for_backend
+
+        values = [m["value"] for m in thinking_modes_for_backend("who-knows")]
+        assert values == ["off", "low", "medium", "high", "xhigh", "max"]
+
+    def test_effort_hint_per_backend(self):
+        from mira.dashboard.models_config import effort_hint
+
+        assert "--effort" in effort_hint("antigravity-cli")
+        assert "model_reasoning_effort" in effort_hint("codex-cli")
+        assert effort_hint("nonexistent") == effort_hint("openai-compatible")

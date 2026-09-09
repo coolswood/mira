@@ -155,12 +155,15 @@ async def get_models() -> ModelsResponse:
     from mira.dashboard.model_catalog import active_backend, build_options, fetch_catalog
     from mira.dashboard.models_config import (
         API_STYLES,
-        THINKING_MODES,
+        effort_hint,
         get_indexing_model,
+        get_indexing_thinking_mode,
         get_review_model,
         get_review_thinking_mode,
         get_security_model,
+        get_security_thinking_mode,
         resolve_api_style,
+        thinking_modes_for_backend,
     )
 
     config = load_config()
@@ -170,8 +173,16 @@ async def get_models() -> ModelsResponse:
     indexing = get_indexing_model(config.llm, db_indexing)
     review = get_review_model(config.llm, db_review)
     security = get_security_model(config.llm, db_security, db_review)
-    thinking = get_review_thinking_mode(
+    review_thinking = get_review_thinking_mode(
         config.llm, _api._app_db.get_setting("review_thinking_mode")
+    )
+    indexing_thinking = get_indexing_thinking_mode(
+        config.llm, _api._app_db.get_setting("indexing_thinking_mode")
+    )
+    security_thinking = get_security_thinking_mode(
+        config.llm,
+        _api._app_db.get_setting("security_thinking_mode"),
+        _api._app_db.get_setting("review_thinking_mode"),
     )
     api_style = resolve_api_style(config.llm, _api._app_db.get_setting("api_style"))
 
@@ -192,8 +203,11 @@ async def get_models() -> ModelsResponse:
         indexing_options=[ModelOption(**m) for m in build_options(backend, catalog, "indexing")],
         review_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],
         security_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],
-        review_thinking_mode=thinking or "off",
-        thinking_options=[ModelOption(**m) for m in THINKING_MODES],
+        review_thinking_mode=review_thinking or "off",
+        indexing_thinking_mode=indexing_thinking or "off",
+        security_thinking_mode=security_thinking or "off",
+        thinking_options=[ModelOption(**m) for m in thinking_modes_for_backend(backend)],
+        effort_hint=effort_hint(backend),
         api_style=api_style,
         api_style_options=[ModelOption(**m) for m in API_STYLES],
     )
@@ -264,11 +278,13 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     _require_admin(request)
     from mira.dashboard.models_config import API_STYLE_VALUES, THINKING_MODE_VALUES
 
-    if body.review_thinking_mode not in THINKING_MODE_VALUES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{body.review_thinking_mode!r} is not a valid thinking mode.",
-        )
+    for field in ("review_thinking_mode", "indexing_thinking_mode", "security_thinking_mode"):
+        value = getattr(body, field)
+        if value not in THINKING_MODE_VALUES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{value!r} is not a valid thinking mode.",
+            )
     if body.api_style not in API_STYLE_VALUES:
         raise HTTPException(
             status_code=400,
@@ -283,12 +299,11 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     _api._app_db.set_setting("security_model", body.security_model.strip())
     # Clear "off" to "" rather than persisting the literal — "off" is the
     # default, and a stored value would shadow a mira.yaml
-    # `review_reasoning_effort` override. "" (not None — the column is NOT NULL)
+    # `*_reasoning_effort` override. "" (not None — the column is NOT NULL)
     # reads back as unset so the config fallback chain works.
-    if body.review_thinking_mode and body.review_thinking_mode != "off":
-        _api._app_db.set_setting("review_thinking_mode", body.review_thinking_mode)
-    else:
-        _api._app_db.set_setting("review_thinking_mode", "")
+    for field in ("review_thinking_mode", "indexing_thinking_mode", "security_thinking_mode"):
+        value = getattr(body, field)
+        _api._app_db.set_setting(field, value if value not in ("", "off") else "")
 
     # Clear "chat" (default) to "" so a stored value never shadows mira.yaml config overrides.
     if body.api_style and body.api_style != "chat":

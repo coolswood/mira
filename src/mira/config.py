@@ -51,6 +51,12 @@ class LLMConfig(BaseModel):
     # `llm_config_for`, the same way `model` is resolved from `review_model`).
     review_reasoning_effort: str | None = None
     reasoning_effort: str | None = None
+    # Per-purpose mira.yaml-level efforts, resolved by `llm_config_for` the
+    # same way (DB → here → None); the security pass additionally falls back
+    # to `review_reasoning_effort`. Indexing defaults to no reasoning — it's
+    # the highest-volume, lowest-stakes pass.
+    indexing_reasoning_effort: str | None = None
+    security_reasoning_effort: str | None = None
     temperature: float = 0.2
     max_tokens: int = 4096
     max_context_tokens: int = 120_000

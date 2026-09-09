@@ -416,3 +416,33 @@ class TestCodexCLIProvider:
 
         assert msg == {"content": "", "tool_calls": []}
         provider._run_codex.assert_not_awaited()
+
+
+class TestCodexCommandEffort:
+    def test_effort_passed_as_config_override(self):
+        from mira.llm.codex_cli import CodexCLIProvider
+
+        provider = CodexCLIProvider(
+            LLMConfig(provider="codex-cli", reasoning_effort="medium")
+        )
+        cmd = provider._command("/tmp/out.txt")
+        assert "-c" in cmd
+        assert cmd[cmd.index("-c", cmd.index("-c") + 1) + 1] == "model_reasoning_effort=medium"
+
+    @pytest.mark.parametrize("effort", ["xhigh", "max"])
+    def test_stronger_efforts_clamp_to_high(self, effort: str):
+        from mira.llm.codex_cli import CodexCLIProvider
+
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli", reasoning_effort=effort))
+        cmd = provider._command("/tmp/out.txt")
+        assert "model_reasoning_effort=high" in cmd
+
+    def test_no_effort_flag_when_unset_or_off(self):
+        from mira.llm.codex_cli import CodexCLIProvider
+
+        for effort in (None, "off"):
+            provider = CodexCLIProvider(
+                LLMConfig(provider="codex-cli", reasoning_effort=effort)
+            )
+            cmd = provider._command("/tmp/out.txt")
+            assert not any(str(part).startswith("model_reasoning_effort") for part in cmd)
