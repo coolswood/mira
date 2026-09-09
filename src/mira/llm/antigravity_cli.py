@@ -310,6 +310,24 @@ class AntigravityCLIProvider:
                             tracker.call_usage(progress_key, **usage)
                         envelope_error = str(result.get("error") or "")
                         status = str(result.get("status", ""))
+                        denied = [
+                            a for a in (result.get("denied_actions") or [])
+                            if isinstance(a, dict)
+                        ]
+                        if denied:
+                            names = ", ".join(
+                                str(a.get("display_name") or a.get("action") or "?")
+                                for a in denied
+                            )
+                            logger.warning(
+                                "antigravity denied tool calls (%s) — headless mode "
+                                "never grants them", names,
+                            )
+                            if status == "SUCCESS" and not result.get("response"):
+                                logger.warning(
+                                    "antigravity returned no text after denying tools: "
+                                    "the model tried to act instead of answering"
+                                )
                         if status and status != "SUCCESS":
                             logger.warning(
                                 "antigravity result status %s: %s",
@@ -413,6 +431,8 @@ class AntigravityCLIProvider:
     def _messages_prompt(self, messages: list[dict]) -> str:
         parts = [
             "You are running as Mira's model backend through Antigravity CLI.",
+            "Do not use tools, run commands, or access files: the workspace is empty"
+            " and every tool call is auto-denied, which voids the answer.",
             "Follow the Mira review instructions exactly. Do not mention Antigravity CLI.",
             "Return only the requested final answer; no prose wrappers unless explicitly requested.",
             "",
