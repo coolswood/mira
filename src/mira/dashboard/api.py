@@ -1606,20 +1606,27 @@ def get_activity_compare(owner: str, repo: str, pr_number: int) -> CompareDetail
             comments = comments_by_review.get(e.id, [])
             if e.kind == "compare" and main_event is not None and e.status == "completed":
                 compare_shims = [_shim(c) for c in comments]
-                shared = 0
+                # One compare finding may duplicate several near-identical
+                # main findings (and vice versa), so shared counts matched
+                # MAIN findings (unique) while only_compare counts compare
+                # findings with no main match at all — neither counter can
+                # go negative or double-count a single main finding.
                 matched_main: set[int] = set()
+                matched_compare = 0
                 for c_shim in compare_shims:
+                    hit = False
                     for i, m_shim in enumerate(main_shims):
                         if _is_duplicate(c_shim, m_shim):
-                            shared += 1
                             matched_main.add(i)
-                            break
+                            hit = True
+                    if hit:
+                        matched_compare += 1
                 overlaps.append(
                     CompareOverlapModel(
                         model=e.model or f"review #{e.id}",
-                        shared=shared,
+                        shared=len(matched_main),
                         only_main=len(main_shims) - len(matched_main),
-                        only_compare=len(compare_shims) - shared,
+                        only_compare=len(compare_shims) - matched_compare,
                     )
                 )
             passes.append(

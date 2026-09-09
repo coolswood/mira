@@ -346,6 +346,40 @@ def test_compare_endpoint_groups_rounds_and_overlaps(compare_db: AppDatabase):
     assert detail.rounds[1].overlaps == []
 
 
+def test_compare_overlap_double_match_counts_unique_mains(compare_db: AppDatabase):
+    """Two compare findings duplicating the same main finding must count as
+    one shared main (not shared=2, and neither counter negative)."""
+    compare_db.register_repo("acme", "web")
+    store = IndexStore.open("acme", "web")
+    url = "https://github.com/acme/web/pull/6"
+    main = store.record_review(
+        pr_number=6, pr_title="D", pr_url=url, comments_posted=1,
+        blockers=1, warnings=0, model="m", kind="review", head_sha="s1", created_at=100.0,
+    )
+    store.add_review_comments(main.id, 6, url, [
+        {"path": "a.py", "line": 1, "severity": "blocker", "category": "bug",
+         "title": "Null deref", "body": "x"},
+    ])
+    shadow = store.record_review(
+        pr_number=6, pr_title="D", pr_url=url, comments_posted=2,
+        blockers=2, warnings=0, model="s", kind="compare", head_sha="s1", created_at=110.0,
+    )
+    store.add_review_comments(shadow.id, 6, url, [
+        # Both duplicate the same main finding (same file+line+category).
+        {"path": "a.py", "line": 1, "severity": "blocker", "category": "bug",
+         "title": "Null deref here", "body": "x"},
+        {"path": "a.py", "line": 1, "severity": "blocker", "category": "bug",
+         "title": "Deref of null", "body": "y"},
+    ])
+    store.close()
+
+    detail = api.get_activity_compare("acme", "web", 6)
+    overlap = detail.rounds[0].overlaps[0]
+    assert overlap.shared == 1  # one main finding found by both — not 2
+    assert overlap.only_main == 0
+    assert overlap.only_compare == 0  # both compare findings duplicate the main
+
+
 def test_compare_endpoint_404_for_unknown_pr(compare_db: AppDatabase):
     _seed_compare_round(compare_db)
     with pytest.raises(HTTPException) as exc:

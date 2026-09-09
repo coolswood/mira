@@ -210,7 +210,8 @@ async def run_pr_review(
     config = load_config()
     from mira.dashboard.models_config import llm_config_for
 
-    llm = create_llm(llm_config_for("review", config.llm))
+    review_llm_config = llm_config_for("review", config.llm)
+    llm = create_llm(review_llm_config)
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
     security_llm = create_llm(llm_config_for("security", config.llm))
     # Not `provider` — that name is the platform provider parameter, and
@@ -224,6 +225,7 @@ async def run_pr_review(
         bot_name=bot_name,
         indexing_llm=indexing_llm,
         security_llm=security_llm,
+        model_label=review_llm_config.model,
     )
 
     from mira.dashboard.api import _app_db
@@ -327,7 +329,8 @@ async def run_pr_command(
     config = load_config()
     from mira.dashboard.models_config import llm_config_for
 
-    llm = create_llm(llm_config_for("review", config.llm))
+    review_llm_config = llm_config_for("review", config.llm)
+    llm = create_llm(review_llm_config)
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
     security_llm = create_llm(llm_config_for("security", config.llm))
 
@@ -389,6 +392,7 @@ async def run_pr_command(
             bot_name=bot_name,
             indexing_llm=indexing_llm,
             security_llm=security_llm,
+            model_label=review_llm_config.model,
         )
         if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
             logger.info("Review already in progress for %s, skipping", pr_url)
