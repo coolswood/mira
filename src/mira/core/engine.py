@@ -33,6 +33,7 @@ from mira.exceptions import MiraError, ResponseParseError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
+from mira.l10n.pipeline import is_l10n_path, l10n_review_pass
 from mira.llm.prompts.review import (
     build_review_prompt,
     build_walkthrough_prompt,
@@ -1477,14 +1478,39 @@ class ReviewEngine:
             else _asyncio.sleep(0, result=[])
         )
 
+        # Localization-consistency pass: deterministic key/placeholder/ICU
+        # checks plus batched LLM translation QA on changed keys. Anchors to
+        # changed keys, so it covers locale files the diff-size budget
+        # skipped from the main review. Zero cost when no l10n file changed.
+        l10n_files = (
+            [f for f in filtered if is_l10n_path(f.path, self.config.l10n.patterns)]
+            if self.config.l10n.enabled
+            else []
+        )
+        l10n_task = _asyncio.create_task(
+            l10n_review_pass(
+                self.llm,
+                l10n_files,
+                provider=self.provider,
+                pr_info=getattr(self, "_pr_info", None),
+                repo_tree=list(self._agentic_repo_tree),
+                pr_title=pr_title,
+                indexing_llm=self.indexing_llm,
+                config=self.config.l10n,
+            )
+            if l10n_files and self.provider is not None
+            else _asyncio.sleep(0, result=[])
+        )
+
         (
             chunk_results,
             security_comments,
             dependency_comments,
             osv_comments,
             secrets_comments,
+            l10n_comments,
         ) = await _asyncio.gather(
-            review_task, security_task, dependency_task, osv_task, secrets_task
+            review_task, security_task, dependency_task, osv_task, secrets_task, l10n_task
         )
 
         all_comments: list[ReviewComment] = []
@@ -1504,6 +1530,8 @@ class ReviewEngine:
         all_comments.extend(osv_comments)
         audit.append({"stage": "drafted", "chunk": "secrets", "count": len(secrets_comments)})
         all_comments.extend(secrets_comments)
+        audit.append({"stage": "drafted", "chunk": "l10n", "count": len(l10n_comments)})
+        all_comments.extend(l10n_comments)
 
         all_comments = [classify_severity(c) for c in all_comments]
 
