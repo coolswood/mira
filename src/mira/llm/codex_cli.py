@@ -493,13 +493,13 @@ class CodexCLIProvider:
         return {"content": "", "tool_calls": []}
 
     async def review(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
-        from mira.llm.provider import SUBMIT_REVIEW_TOOL
+        from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL
 
         return await self.complete_with_tools(
             messages, tools=[SUBMIT_REVIEW_TOOL], temperature=temperature
         )
 
     async def walkthrough(self, messages: list[dict[str, str]]) -> str:
-        from mira.llm.provider import SUBMIT_WALKTHROUGH_TOOL
+        from mira.llm.tool_schemas import SUBMIT_WALKTHROUGH_TOOL
 
         return await self.complete_with_tools(messages, tools=[SUBMIT_WALKTHROUGH_TOOL])
