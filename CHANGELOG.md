@@ -4,6 +4,18 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0-chatter1] — 2026-09-09
+
+### Added
+
+- **Visible review start / clean-finish comments.** Repeat reviews are quiet by design (round 2+ reviews the incremental diff under raised thresholds, and the walkthrough is edited in place), so a PR can take several pushes with no visible bot activity. A review that actually starts now posts a short playful "starting" line, and a completed review with zero findings posts a "done, all clear" line; findings themselves remain the visible output when they exist. Both are gated by `review.chat_updates` (default on) and dry-run mode; stdin diff review stays silent.
+
+### Fixed
+
+- **codex CLI stream limit.** The terminal `item.completed` event carries a whole agent message on one JSONL line; asyncio's default 64 KiB stream-reader limit made `readline()` abort valid large reviews. The subprocess pipes now open with a 10 MiB limit (twin of the earlier agy fix).
+- **Chunk counter on out-of-order completion.** Review chunks finish out of order under concurrency; `max(chunks_done, index)` jumped the progress counter to 100% (and killed the ETA) while earlier chunks were still in flight. The counter now increments per completion.
+- **Root-level localization family grouping.** `rsplit("/", 1)[0]` returns the filename for slash-less paths, so root-level `.arb` files each became their own "directory" and sibling locales were never fetched or cross-checked. A `_parent_dir` helper maps root-level files to `""` so they group together.
+
 ## [0.9.0-models1] — 2026-09-09
 
 ### Added
