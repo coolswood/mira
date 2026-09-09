@@ -43,6 +43,7 @@ EXPECTED_ROUTES = {
     ("/api/learned-rules/{owner}/{repo}/{rule_id}/approve", "POST"),
     ("/api/learned-rules/{owner}/{repo}/{rule_id}/reject", "POST"),
     ("/api/packages/search", "GET"),
+    ("/api/progress", "GET"),
     ("/api/relationships", "GET"),
     ("/api/relationships/custom", "GET"),
     ("/api/relationships/custom", "POST"),

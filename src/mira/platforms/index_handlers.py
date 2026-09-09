@@ -41,38 +41,66 @@ async def run_incremental_index(
     from mira.dashboard.models_config import llm_config_for
 
     llm = create_llm(llm_config_for("indexing", config.llm))
-    store = IndexStore.open(owner, repo, platform=platform)
+    progress_key = None
+    try:
+        from mira.core.progress import INDEXING, indexing_key, tracker
 
-    total_affected = len(changed_paths) + len(removed_paths)
-    if total_affected > _INCREMENTAL_FILE_CAP:
-        logger.info(
-            "Push to %s/%s touched %d files (cap=%d), running full re-index",
-            owner,
-            repo,
-            total_affected,
-            _INCREMENTAL_FILE_CAP,
-        )
-        count = await index_repo(
-            owner=owner,
-            repo=repo,
-            config=config,
-            store=store,
-            llm=llm,
-            branch=default_branch,
-            fetcher=fetcher,
-        )
-    else:
-        count = await index_diff(
-            owner=owner,
-            repo=repo,
-            config=config,
-            store=store,
-            llm=llm,
-            changed_paths=changed_paths,
-            removed_paths=removed_paths,
-            branch=default_branch,
-            fetcher=fetcher,
-        )
+        progress_key = indexing_key(owner, repo)
+        tracker.begin(progress_key, INDEXING, f"{owner}/{repo}")
+    except Exception:
+        pass
+    llm.progress_key = progress_key  # type: ignore[attr-defined]
+    try:
+        store = IndexStore.open(owner, repo, platform=platform)
+
+        total_affected = len(changed_paths) + len(removed_paths)
+        if total_affected > _INCREMENTAL_FILE_CAP:
+            logger.info(
+                "Push to %s/%s touched %d files (cap=%d), running full re-index",
+                owner,
+                repo,
+                total_affected,
+                _INCREMENTAL_FILE_CAP,
+            )
+            count = await index_repo(
+                owner=owner,
+                repo=repo,
+                config=config,
+                store=store,
+                llm=llm,
+                branch=default_branch,
+                fetcher=fetcher,
+            )
+        else:
+            count = await index_diff(
+                owner=owner,
+                repo=repo,
+                config=config,
+                store=store,
+                llm=llm,
+                changed_paths=changed_paths,
+                removed_paths=removed_paths,
+                branch=default_branch,
+                fetcher=fetcher,
+            )
+    except Exception as exc:
+        # Running jobs are never TTL-evicted — an unfailed job would show as
+        # stuck on the dashboard forever. Fail it, then re-raise.
+        if progress_key:
+            try:
+                from mira.core.progress import tracker
+
+                tracker.fail(progress_key, str(exc)[:500])
+            except Exception:
+                pass
+        raise
+    if progress_key:
+        try:
+            from mira.core.progress import tracker
+
+            tracker.finish(progress_key)
+        except Exception:
+            pass
 
     # ``count`` is the number of files re-indexed *this run*, not the total
     # in the store. For incremental runs that's a small subset (e.g. 3 of 120),

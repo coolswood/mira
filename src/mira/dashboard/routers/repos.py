@@ -505,15 +505,21 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
     async def _do_index() -> None:
         count = 0
         store = None
+        progress_key = None
         try:
+            from mira.core.progress import INDEXING, indexing_key
+            from mira.core.progress import tracker as progress_tracker
             from mira.dashboard.models_config import llm_config_for
 
             tracker.start(full_name)
+            progress_key = indexing_key(owner, repo)
+            progress_tracker.begin(progress_key, INDEXING, full_name)
             config = load_config()
             # Use the configured indexing model — without this swap we'd
             # silently fall back to the review model, which is slower and
             # more expensive per token.
             llm = create_llm(llm_config_for("indexing", config.llm))
+            llm.progress_key = progress_key  # type: ignore[attr-defined]
             store = IndexStore.open(owner, repo, platform=platform)
             if full:
                 # Wipe existing index
@@ -543,6 +549,7 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
                 platform=platform,
             )
             tracker.complete(full_name, count)
+            progress_tracker.finish(progress_key)
             logger.info(
                 "Index %s for %s: %d files", "rebuild" if full else "update", full_name, count
             )
@@ -562,6 +569,16 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
             tracker.fail(full_name, str(exc))
             logger.exception("Indexing failed for %s", full_name)
         finally:
+            if progress_key is not None:
+                try:
+                    from mira.core.progress import tracker as progress_tracker
+
+                    job = progress_tracker.get(progress_key)
+                    if job and job.status == "running":
+                        # Cancel/empty/fail paths end here without a clean finish.
+                        progress_tracker.fail(progress_key, "indexing ended")
+                except Exception:
+                    pass
             if store is not None:
                 store.close()
 

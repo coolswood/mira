@@ -14,6 +14,7 @@ from mira.dashboard.api import (
     ActivityResponse,
     CostEstimate,
     IndexStatusModel,
+    JobProgressModel,
     OrgStatsModel,
     ReviewStatsModel,
     TimeSeriesPoint,
@@ -57,6 +58,21 @@ def get_indexing_status() -> list[IndexStatusModel]:
         )
         for j in tracker.get_all()
     ]
+
+
+@router.get("/api/progress", response_model=list[JobProgressModel])
+def get_progress(active_only: bool = False) -> list[JobProgressModel]:
+    """Live progress for long-running jobs (reviews, indexing).
+
+    Returns every tracked job — active ones plus recently finished (kept in
+    memory for an hour) so the dashboard can show both "what's running" and
+    "what just happened". Clients subscribe to the ``job_progress`` SSE event
+    for live updates and use this endpoint as the initial snapshot.
+    """
+    from mira.core.progress import tracker
+
+    jobs = tracker.snapshot_active() if active_only else tracker.snapshot_all()
+    return [JobProgressModel(**j) for j in jobs]
 
 
 @router.get("/api/indexing/estimate", response_model=CostEstimate)

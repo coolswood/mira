@@ -54,6 +54,58 @@ def _open_store(owner: str, repo: str, platform: str = "github") -> IndexStore:
     return IndexStore.open(owner, repo, platform=platform)
 
 
+def _begin_progress(
+    repo_full: str,
+    number: int,
+    pr_title: str,
+    pr_url: str,
+) -> str | None:
+    """Register a review job in the live progress tracker.
+
+    Returns the job key (also set on LLM providers so call-level events are
+    attributed to this job), or None when the tracker isn't available —
+    progress is observability, never a review dependency.
+    """
+    try:
+        from mira.core.progress import REVIEW, tracker
+
+        key = f"{repo_full}#{number}"
+        tracker.begin(
+            key,
+            REVIEW,
+            repo_full,
+            pr_number=number,
+            pr_title=pr_title,
+            pr_url=pr_url,
+        )
+        return key
+    except Exception as exc:
+        logger.debug("Progress tracking unavailable: %s", exc)
+        return None
+
+
+def _finish_progress(progress_key: str | None) -> None:
+    if not progress_key:
+        return
+    try:
+        from mira.core.progress import tracker
+
+        tracker.finish(progress_key)
+    except Exception:
+        pass
+
+
+def _fail_progress(progress_key: str | None, exc: BaseException) -> None:
+    if not progress_key:
+        return
+    try:
+        from mira.core.progress import tracker
+
+        tracker.fail(progress_key, str(exc)[:500])
+    except Exception:
+        pass
+
+
 def _help_message(bot_name: str) -> str:
     """Markdown help comment listing every command Mira understands."""
     return (
@@ -128,12 +180,23 @@ async def run_pr_review(
     is_indexed = bool(repo_record and repo_record.status == "ready")
 
     logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
+
+    # Register only after the fallible setup above: a config/LLM/DB failure
+    # here must not leave a forever-"running" job (running entries are never
+    # TTL-evicted). Everything after this point is guarded below.
+    progress_key = _begin_progress(repo_full, number, pr_title, pr_url)
+    # Not `provider` — that name is the platform provider parameter, and
+    # shadowing it here would hand the engine an LLM provider instead.
+    for llm_tier in (llm, indexing_llm, security_llm):
+        llm_tier.progress_key = progress_key  # type: ignore[attr-defined]
     try:
         result = await engine.review_pr(pr_url)
         review_tracker.complete(repo_full, number)
     except Exception as exc:
         review_tracker.fail(repo_full, number, str(exc))
+        _fail_progress(progress_key, exc)
         raise
+    _finish_progress(progress_key)
 
     # The walkthrough comment already carries the "more accurate after indexing"
     # nudge for unindexed repos, so we don't post a separate note here — that
@@ -222,6 +285,9 @@ async def run_pr_command(
         if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
             logger.info("Review already in progress for %s, skipping", pr_url)
             return
+        progress_key = _begin_progress(repo_full, number, pr_title, pr_url)
+        for llm_provider in (llm, indexing_llm, security_llm):
+            llm_provider.progress_key = progress_key  # type: ignore[attr-defined]
         logger.info(
             "review-rest on %s by @%s — %d file(s)", pr_url, actor, len(progress.skipped_paths)
         )
@@ -230,7 +296,9 @@ async def run_pr_command(
             review_tracker.complete(repo_full, number)
         except Exception as exc:
             review_tracker.fail(repo_full, number, str(exc))
+            _fail_progress(progress_key, exc)
             raise
+        _finish_progress(progress_key)
     elif is_review:
         engine = ReviewEngine(
             config=config,
@@ -243,13 +311,18 @@ async def run_pr_command(
         if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
             logger.info("Review already in progress for %s, skipping", pr_url)
             return
+        progress_key = _begin_progress(repo_full, number, pr_title, pr_url)
+        for llm_provider in (llm, indexing_llm, security_llm):
+            llm_provider.progress_key = progress_key  # type: ignore[attr-defined]
         logger.info("Re-review triggered for %s by @%s", pr_url, actor)
         try:
             await engine.review_pr(pr_url)
             review_tracker.complete(repo_full, number)
         except Exception as exc:
             review_tracker.fail(repo_full, number, str(exc))
+            _fail_progress(progress_key, exc)
             raise
+        _finish_progress(progress_key)
     else:
         pr_info = await provider.get_pr_info(pr_url)
         diff_text = await provider.get_pr_diff(pr_info)
