@@ -177,24 +177,26 @@ async def l10n_review_pass(
         return []
 
     # ── Fetch full localization files from the PR head ──────────────────
+    # l10n.yaml is the authoritative template source, so it is fetched first
+    # and its pick wins. The diff-shape heuristic (_discover_family) is only
+    # a fallback for repos without the file: a wrong guess floods false
+    # "missing from template" findings (cognitive_psy PR #684 — split-fragment
+    # src/ru/*.arb sources out-populated the real arb-dir in the diff, and the
+    # heuristic crowned an unrelated fragment as the template).
+    yaml_candidate: str | None = None
     template_path: str | None = None
     contents: dict[str, str] = {}
     if provider is not None and pr_info is not None:
         family_paths, guessed = _discover_family(repo_tree or [], cfg.patterns, diffed_paths)
         ref = pr_info.head_branch
-        template_path = guessed
-        fetch = sorted(set(family_paths) | diffed_paths)
+        l10n_yaml = await _fetch_all(provider, pr_info, ref, ["l10n.yaml"])
+        raw = l10n_yaml.get("l10n.yaml", "")
+        if raw:
+            arb_dir, template_name = _parse_l10n_yaml(raw)
+            yaml_candidate = f"{arb_dir}/{template_name}" if arb_dir else template_name
+        template_path = yaml_candidate or guessed
+        fetch = sorted(set(family_paths) | diffed_paths | ({yaml_candidate} if yaml_candidate else set()))
         contents = await _fetch_all(provider, pr_info, ref, fetch)
-        if template_path is not None and not contents.get(template_path):
-            template_path = None
-        if template_path is None:
-            l10n_yaml = await _fetch_all(provider, pr_info, ref, ["l10n.yaml"])
-            raw = l10n_yaml.get("l10n.yaml", "")
-            if raw:
-                arb_dir, template_name = _parse_l10n_yaml(raw)
-                candidate = f"{arb_dir}/{template_name}" if arb_dir else template_name
-                if candidate in contents:
-                    template_path = candidate
 
     parsed: dict[str, ArbFile] = {
         path: parse_arb(path, content) for path, content in contents.items()
@@ -209,21 +211,33 @@ async def l10n_review_pass(
         if arb is not None and keys:
             keys_per_file[path] = keys & set(arb.entries)
 
-    template: ArbFile | None = parsed.get(template_path) if template_path else None
+    template: ArbFile | None = None
+    template_from_yaml = False
+    if yaml_candidate:
+        cand = parsed.get(yaml_candidate)
+        if cand is not None and cand.parsed_ok:
+            template = cand
+            template_from_yaml = True
+    if template is None and template_path and template_path != yaml_candidate:
+        cand = parsed.get(template_path)
+        if cand is not None and cand.parsed_ok:
+            template = cand
     family: dict[str, ArbFile] = {}
     if template is not None:
         tdir = template.path.rsplit("/", 1)[0]
         family = {p: a for p, a in parsed.items() if a.parsed_ok and p.rsplit("/", 1)[0] == tdir}
-        # A diffed file with more entries than the l10n.yaml pick means the
-        # yaml guess was wrong (or absent) — trust the data instead.
-        biggest = max(family.values(), key=lambda a: len(a.entries), default=None)
-        if biggest is not None and len(biggest.entries) > len(template.entries) * 2:
-            template = biggest
-            family = {
-                p: a
-                for p, a in parsed.items()
-                if a.parsed_ok and p.rsplit("/", 1)[0] == template.path.rsplit("/", 1)[0]
-            }
+        # Heuristic pick only: a diffed file with more entries than the guess
+        # means the guess was wrong — trust the data instead. An explicit
+        # l10n.yaml pick is authoritative and never overruled.
+        if not template_from_yaml:
+            biggest = max(family.values(), key=lambda a: len(a.entries), default=None)
+            if biggest is not None and len(biggest.entries) > len(template.entries) * 2:
+                template = biggest
+                family = {
+                    p: a
+                    for p, a in parsed.items()
+                    if a.parsed_ok and p.rsplit("/", 1)[0] == template.path.rsplit("/", 1)[0]
+                }
 
     # ── Deterministic checks (no quota) ─────────────────────────────────
     findings: list[L10nFinding] = []

@@ -221,6 +221,30 @@ def test_check_against_template_flags_unknown_key() -> None:
     assert "unknown_key" in findings[0].title
 
 
+def test_check_against_template_skips_structural_mismatch() -> None:
+    # cognitive_psy PR #684: a "template" sharing almost no keys with the
+    # file does not govern it (split-fragment source tree, wrong heuristic
+    # guess). Without the guard this floods one false finding per key.
+    common = parse_arb(
+        "lib/l10n/src/ru/common.arb",
+        json.dumps({f"common_key{i}": f"Общая строка {i}" for i in range(10)}, indent=2) + "\n",
+    )
+    fragment = parse_arb(
+        "lib/l10n/src/ru/home_bot.arb",
+        json.dumps({f"homeBotKey{i}": f"Ключ {i}" for i in range(9)}, indent=2) + "\n",
+    )
+    assert len(fragment.entries) >= 8  # guard threshold sanity
+    assert check_against_template(fragment, set(fragment.entries), common) == []
+    # Below the size threshold the guard stays out of the way: a small file
+    # with unknown keys is still flagged (the check's original purpose).
+    tiny = parse_arb(
+        "lib/l10n/app_de.arb",
+        json.dumps({f"tiny_key{i}": f"Wert {i}" for i in range(3)}, indent=2) + "\n",
+    )
+    findings = check_against_template(tiny, set(tiny.entries), common)
+    assert len(findings) == 3
+
+
 # ── pass.py ──────────────────────────────────────────────────────────
 
 FILES = {
@@ -337,6 +361,62 @@ async def test_pass_respects_llm_call_budget() -> None:
         config=cfg,
     )
     assert llm.calls == 0
+
+
+async def test_pass_yaml_template_beats_diff_shape_heuristic() -> None:
+    # cognitive_psy PR #684 regression: only split-fragment sources
+    # (src/ru/*.arb) survived the diff budget. The majority-dir heuristic
+    # crowned src/ru/common.arb (an unrelated fragment) as the template and
+    # produced 55 false "missing from template" findings. l10n.yaml names
+    # the real template and must win.
+    fragment_files = {
+        "l10n.yaml": L10N_YAML,
+        "lib/l10n/app_ru.arb": RU,
+        "lib/l10n/src/ru/common.arb": '{"common_welcome": "Общий экран"}\n',
+        "lib/l10n/src/ru/home_bot.arb": RU,  # same keys as the real template
+    }
+    provider = FakeProvider(fragment_files)
+    llm = FakeLLM()
+    diffed = [
+        _fdiff("lib/l10n/src/ru/common.arb", ['"common_welcome": "Общий экран"']),
+        _fdiff("lib/l10n/src/ru/home_bot.arb", ['"app_title": "Наше приложение"']),
+    ]
+    comments = await l10n_review_pass(
+        llm,
+        diffed,
+        provider=provider,
+        pr_info=_pr_info(),
+        repo_tree=[
+            "lib/l10n/app_ru.arb",
+            "lib/l10n/src/ru/common.arb",
+            "lib/l10n/src/ru/home_bot.arb",
+        ],
+        pr_title="l10n update",
+        config=L10nConfig(max_llm_calls=0),
+    )
+    assert "lib/l10n/app_ru.arb" in provider.fetched  # yaml template was fetched
+    assert not any("Ключа нет в шаблоне" in c.title for c in comments)
+
+
+async def test_pass_falls_back_to_heuristic_without_l10n_yaml() -> None:
+    # No l10n.yaml in the repo: the diff-shape heuristic still picks a
+    # working template from the diffed arb-dir.
+    no_yaml = {k: v for k, v in FILES.items() if k != "l10n.yaml"}
+    provider = FakeProvider(no_yaml)
+    llm = FakeLLM()
+    diffed = [_fdiff("lib/l10n/app_ru.arb", ['"greeting": "Привет, {name}!",'])]
+    comments = await l10n_review_pass(
+        llm,
+        diffed,
+        provider=provider,
+        pr_info=_pr_info(),
+        repo_tree=TREE,
+        pr_title="l10n update",
+        config=L10nConfig(max_llm_calls=0),
+    )
+    assert llm.calls == 0
+    # greeting is a known template key: no "missing from template" noise.
+    assert not any("Ключа нет в шаблоне" in c.title for c in comments)
 
 
 def test_build_rows_dedupes_and_covers_family() -> None:
