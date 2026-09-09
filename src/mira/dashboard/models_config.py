@@ -215,8 +215,18 @@ def get_security_thinking_mode(
     followed the review mode) → config.security_reasoning_effort →
     config.review_reasoning_effort → None. "off" normalizes to None at every
     step, exactly like :func:`get_review_thinking_mode`.
+
+    One exception: a literal stored ``"off"`` in security's own DB key is an
+    explicit disable, not an unset value. Unlike review/indexing (whose
+    fallback is mira.yaml), security's chain falls through to another
+    *dashboard* setting — the review effort — so a saved "off" could never
+    win while review reasoning is active and the selector's round-trip would
+    lie. ``""`` (rows written by older builds, which cleared "off") still
+    means "unset" and keeps the historical inheritance.
     """
-    resolved = db_value if (db_value and db_value != "off") else None
+    if db_value == "off":
+        return None
+    resolved = db_value if db_value else None
     if resolved is None:
         resolved = db_review_value if (db_review_value and db_review_value != "off") else None
     if resolved is None:

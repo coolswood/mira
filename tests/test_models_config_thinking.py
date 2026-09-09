@@ -172,6 +172,17 @@ class TestGetSecurityThinkingMode:
     def test_off_normalizes_to_none(self, own, review):
         assert get_security_thinking_mode(LLMConfig(), own, review) is None
 
+    def test_explicit_off_beats_active_review_setting(self):
+        # The dashboard's security selector must be able to turn reasoning
+        # off while the review effort is active — a literal stored "off" is
+        # an explicit disable, not an unset value.
+        assert get_security_thinking_mode(LLMConfig(), "off", "high") is None
+
+    def test_legacy_empty_still_inherits_review_setting(self):
+        # Rows written by older builds ("off" cleared to "") keep the
+        # historical inherit-from-review behavior.
+        assert get_security_thinking_mode(LLMConfig(), "", "high") == "high"
+
     def test_review_db_beats_security_yaml(self):
         # Dashboard settings (DB) sit above mira.yaml across the board.
         cfg = LLMConfig(security_reasoning_effort="low")
@@ -216,7 +227,7 @@ class TestSetModelsPerPurposeEffort:
         assert in_memory_db.get_setting("review_thinking_mode") == "high"
         assert in_memory_db.get_setting("security_thinking_mode") == "medium"
 
-    def test_off_clears_each_setting(self, in_memory_db: AppDatabase):
+    def test_off_clears_review_and_indexing_but_persists_for_security(self, in_memory_db: AppDatabase):
         in_memory_db.set_setting("indexing_thinking_mode", "low")
         in_memory_db.set_setting("security_thinking_mode", "high")
         body = ModelsUpdate(
@@ -229,7 +240,25 @@ class TestSetModelsPerPurposeEffort:
         assert set_models(body, _admin_req()) == {"ok": True}
         assert in_memory_db.get_setting("indexing_thinking_mode") == ""
         assert in_memory_db.get_setting("review_thinking_mode") == ""
-        assert in_memory_db.get_setting("security_thinking_mode") == ""
+        # Security keeps the literal: its resolution falls through to the
+        # review *dashboard* setting, so "explicitly off" must persist to be
+        # distinguishable from "unset" ("" rows inherit review).
+        assert in_memory_db.get_setting("security_thinking_mode") == "off"
+
+    def test_security_off_survives_round_trip_with_active_review(self, in_memory_db: AppDatabase):
+        # The dashboard flow that used to lie: review effort on, security
+        # explicitly off — after save+resolve, security must stay off.
+        body = ModelsUpdate(
+            indexing_model="m1",
+            review_model="m2",
+            review_thinking_mode="high",
+            security_thinking_mode="off",
+        )
+        assert set_models(body, _admin_req()) == {"ok": True}
+        resolved = llm_config_for("security", LLMConfig())
+        assert resolved.reasoning_effort is None
+        # ...while the review pass keeps its own effort.
+        assert llm_config_for("review", LLMConfig()).reasoning_effort == "high"
 
     @pytest.mark.parametrize("field", ["indexing_thinking_mode", "security_thinking_mode"])
     def test_rejects_invalid_per_purpose_mode(self, in_memory_db: AppDatabase, field: str):

@@ -374,9 +374,14 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     # default, and a stored value would shadow a mira.yaml
     # `*_reasoning_effort` override. "" (not None — the column is NOT NULL)
     # reads back as unset so the config fallback chain works.
-    for field in ("review_thinking_mode", "indexing_thinking_mode", "security_thinking_mode"):
+    for field in ("review_thinking_mode", "indexing_thinking_mode"):
         value = getattr(body, field)
         _api._app_db.set_setting(field, value if value not in ("", "off") else "")
+    # Security is the exception: its resolution falls through to the review
+    # *dashboard* setting, so an explicit "off" must persist as a literal —
+    # otherwise the selector could never disable security reasoning while
+    # review reasoning is active (get_security_thinking_mode honors it).
+    _api._app_db.set_setting("security_thinking_mode", body.security_thinking_mode)
 
     # Clear "chat" (default) to "" so a stored value never shadows mira.yaml config overrides.
     if body.api_style and body.api_style != "chat":
