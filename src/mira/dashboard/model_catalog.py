@@ -35,6 +35,8 @@ def active_backend(config: LLMConfig) -> str:
         return "bedrock"
     if config.provider in {"codex-cli", "codex_cli", "codex"}:
         return "codex-cli"
+    if config.provider in {"antigravity", "antigravity-cli", "antigravity_cli", "agy"}:
+        return "antigravity-cli"
     profile = profiles.resolve(config.base_url)
     return "openrouter" if profile.get("name") == "openrouter" else "openai-compatible"
 
@@ -101,7 +103,9 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
     backend = active_backend(config)
     if backend == "bedrock":
         cache_key = f"bedrock:{config.region}:{config.aws_profile or ''}"
-    elif backend == "codex-cli":
+    elif backend in {"codex-cli", "antigravity-cli"}:
+        # CLI backends have no HTTP model list; the bundled registry serves
+        # their dropdowns.
         return None
     else:
         cache_key = config.base_url
@@ -152,7 +156,12 @@ def build_options(backend: str, dynamic: list[dict] | None, purpose: str) -> lis
             continue
         if backend == "codex-cli" and provider != "codex-cli":
             continue
-        if backend not in {"bedrock", "codex-cli"} and provider in {"bedrock", "codex-cli"}:
+        if backend == "antigravity-cli" and provider != "antigravity-cli":
+            continue
+        if (
+            backend not in {"bedrock", "codex-cli", "antigravity-cli"}
+            and provider in {"bedrock", "codex-cli", "antigravity-cli"}
+        ):
             continue
         if purpose not in (info.get("purposes") or []):
             continue

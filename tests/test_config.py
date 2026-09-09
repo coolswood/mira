@@ -128,9 +128,12 @@ class TestLoadConfig:
         repo_file = tmp_path / ".mira.yaml"
         repo_file.write_text(
             "llm:\n"
-            "  provider: codex-cli\n"
+            "  provider: antigravity-cli\n"
             "  codex_command: ./repo-controlled-codex\n"
             "  codex_home: ./repo-auth\n"
+            "  antigravity_command: ./repo-controlled-agy\n"
+            "  antigravity_home: ./repo-gemini\n"
+            "  antigravity_api_key: repo-key\n"
         )
 
         config = load_config(repo_file)
@@ -138,6 +141,9 @@ class TestLoadConfig:
         assert config.llm.provider == "openai"
         assert config.llm.codex_command == "codex"
         assert config.llm.codex_home is None
+        assert config.llm.antigravity_command == "agy"
+        assert config.llm.antigravity_home is None
+        assert config.llm.antigravity_api_key is None
 
     def test_explicitly_trusted_cli_config_can_enable_codex(self, tmp_path: Path):
         config_file = tmp_path / "deployment.yaml"

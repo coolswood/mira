@@ -84,6 +84,16 @@ class LLMConfig(BaseModel):
     codex_home: str | None = None
     codex_sandbox: Literal["read-only"] = "read-only"
     codex_timeout_seconds: int = Field(default=900, gt=0)
+    # Antigravity CLI provider settings (Google's agy, Gemini models). Auth is
+    # either a Gemini API key (`antigravity_api_key`, falling back to the
+    # GEMINI_API_KEY environment variable) or cached Google-account
+    # credentials: `antigravity_home` points at a trusted copy of ~/.gemini
+    # (settings.json, login cache) copied into the ephemeral HOME per call.
+    antigravity_command: str = "agy"
+    antigravity_home: str | None = None
+    antigravity_api_key: str | None = None
+    antigravity_sandbox: bool = False
+    antigravity_timeout_seconds: int = Field(default=900, gt=0)
 
     @field_validator("base_url")
     @classmethod
@@ -363,6 +373,11 @@ _DEPLOYMENT_ONLY_LLM_KEYS = frozenset(
         "codex_home",
         "codex_sandbox",
         "codex_timeout_seconds",
+        "antigravity_command",
+        "antigravity_home",
+        "antigravity_api_key",
+        "antigravity_sandbox",
+        "antigravity_timeout_seconds",
     }
 )
 
