@@ -3,7 +3,6 @@ import { useEffect, useState } from "react"
 import { Link, useParams } from "react-router"
 
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
