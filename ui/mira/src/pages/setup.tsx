@@ -42,7 +42,17 @@ export function SetupPage() {
 
   const handleSave = async () => {
     setSaving(true)
-    await api.saveModels(indexingModel, reviewModel, "")
+    // Efforts and API protocol stay at their defaults ("off"/"chat", stored
+    // as "") — the wizard only picks models; everything else is inherited.
+    await api.saveModels({
+      indexing_model: indexingModel,
+      review_model: reviewModel,
+      security_model: "",
+      indexing_thinking_mode: "off",
+      review_thinking_mode: "off",
+      security_thinking_mode: "off",
+      api_style: "chat",
+    })
     navigate("/")
   }
 

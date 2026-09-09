@@ -1,6 +1,16 @@
 import { fetchJson, putJson } from "./http"
 
 // Model selection, cost estimate, and admin review-config overrides.
+export type ModelsSettings = {
+  indexing_model: string
+  review_model: string
+  security_model: string
+  indexing_thinking_mode: string
+  review_thinking_mode: string
+  security_thinking_mode: string
+  api_style: string
+}
+
 export const settingsApi = {
   getModels: () =>
     fetchJson<{
@@ -21,12 +31,15 @@ export const settingsApi = {
       }[]
       review_options: { value: string; label: string; recommended?: boolean }[]
       security_options: { value: string; label: string; recommended?: boolean }[]
+      indexing_thinking_mode: string
       review_thinking_mode: string
+      security_thinking_mode: string
       thinking_options: {
         value: string
         label: string
         recommended?: boolean
       }[]
+      effort_hint: string
       api_style: string
       api_style_options: {
         value: string
@@ -35,20 +48,8 @@ export const settingsApi = {
       }[]
     }>("/api/settings/models"),
 
-  saveModels: (
-    indexing_model: string,
-    review_model: string,
-    security_model: string,
-    review_thinking_mode: string = "off",
-    api_style: string = "chat"
-  ) =>
-    putJson<{ ok: boolean }>("/api/settings/models", {
-      indexing_model,
-      review_model,
-      security_model,
-      review_thinking_mode,
-      api_style,
-    }),
+  saveModels: (body: ModelsSettings) =>
+    putJson<{ ok: boolean }>("/api/settings/models", body),
 
   getCostEstimate: () =>
     fetchJson<{
