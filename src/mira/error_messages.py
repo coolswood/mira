@@ -140,6 +140,10 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         full="Antigravity CLI failed with exit {exit_code}: {detail}",
         safe="Antigravity CLI failed",
     ),
+    "antigravity_result_failed": ErrorMessage(
+        full="Antigravity CLI result status was {status}: {detail}",
+        safe="Antigravity CLI failed",
+    ),
     "antigravity_empty_response": ErrorMessage(
         full="Antigravity CLI returned an empty response",
         safe="Antigravity CLI returned an empty response",
