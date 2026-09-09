@@ -77,6 +77,11 @@ _MODEL_SENTINELS = {"", "default", "antigravity-default", "agy-default"}
 # clamp to "high" (the CLI maximum).
 _EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
 
+# One stream-json line embeds an entire model response (the terminal ``result``
+# envelope), which can exceed asyncio's default 64 KiB stream-reader limit and
+# abort a valid review — open the subprocess pipes with headroom.
+_STREAM_LIMIT = 10 * 1024 * 1024
+
 
 class AntigravityCLIProvider:
     """LLM provider that shells out to Google Antigravity CLI (``agy``).
@@ -202,8 +207,10 @@ class AntigravityCLIProvider:
         envelope carrying status, the final response, and exact token usage.
         Events are parsed as they arrive — both for liveness logging and, when
         ``progress_key`` is set, for the dashboard's live progress view. The
-        ``result`` envelope is the primary result channel; accumulated
-        ``text_delta`` chunks are the fallback.
+        ``result`` envelope is the primary result channel and its status is
+        authoritative — a non-SUCCESS status fails the call even when the
+        process exits 0; accumulated ``text_delta`` chunks are the fallback
+        when the envelope carries no response.
         """
         with tempfile.TemporaryDirectory(prefix="mira-antigravity-") as tmpdir:
             runtime_home = str(Path(tmpdir) / "runtime")
@@ -220,6 +227,7 @@ class AntigravityCLIProvider:
                     env=self._env(runtime_home),
                     cwd=runtime_home,
                     start_new_session=os.name == "posix",
+                    limit=_STREAM_LIMIT,
                 )
             except FileNotFoundError as exc:
                 raise LLMError(
@@ -272,6 +280,7 @@ class AntigravityCLIProvider:
                 text = ""
                 usage: dict[str, int] = {}
                 envelope_error = ""
+                status = ""
                 while True:
                     raw = await proc_stdout.readline()
                     if not raw:
@@ -328,16 +337,19 @@ class AntigravityCLIProvider:
                                     "antigravity returned no text after denying tools: "
                                     "the model tried to act instead of answering"
                                 )
-                        if status and status != "SUCCESS":
-                            logger.warning(
-                                "antigravity result status %s: %s",
-                                status,
-                                envelope_error[:500],
-                            )
                     elif kind == "init":
                         logger.debug("antigravity session initialized")
                     # Unknown event kinds are skipped; the stream must never
                     # break the call.
+                if status and status != "SUCCESS":
+                    # The terminal envelope is authoritative: a failed status
+                    # fails the call even when the process exits 0, so the
+                    # error is raised inside the retry boundary with its detail.
+                    raise LLMError(
+                        "antigravity_result_failed",
+                        status=status,
+                        detail=envelope_error or "terminal result status was not SUCCESS",
+                    )
                 if envelope_error and not usage:
                     logger.warning("antigravity envelope error: %s", envelope_error[:500])
                 return text, usage

@@ -11,7 +11,7 @@ import pytest
 from mira.config import LLMConfig
 from mira.exceptions import LLMError
 from mira.llm import create_llm
-from mira.llm.antigravity_cli import AntigravityCLIProvider
+from mira.llm.antigravity_cli import _STREAM_LIMIT, AntigravityCLIProvider
 
 
 class TestAntigravityCLIProvider:
@@ -310,8 +310,17 @@ class TestAntigravityCLIProvider:
         }
 
     @staticmethod
-    def _reader(lines: list[bytes]) -> asyncio.StreamReader:
-        reader = asyncio.StreamReader()
+    def _reader(
+        lines: list[bytes], stream_limit: int | None = None
+    ) -> asyncio.StreamReader:
+        # Default-constructed readers mirror asyncio's 64 KiB stream limit;
+        # stream_limit mirrors the raised limit the provider passes to
+        # create_subprocess_exec.
+        reader = (
+            asyncio.StreamReader(limit=stream_limit)
+            if stream_limit is not None
+            else asyncio.StreamReader()
+        )
         for line in lines:
             reader.feed_data(line)
         reader.feed_eof()
@@ -321,11 +330,18 @@ class TestAntigravityCLIProvider:
     def _fake_agy_proc(
         events: list[dict],
         exit_code: int = 0,
+        stream_limit: int | None = None,
     ) -> MagicMock:
         """A fake agy process whose stdout carries a stream-json event feed."""
         proc = MagicMock()
+        # Beyond PID_MAX_LIMIT (2**22): unallocatable, so an accidental
+        # os.killpg(proc.pid) from _terminate_process_tree raises
+        # ProcessLookupError instead of signalling a live group. A bare
+        # MagicMock pid would __index__ to 0 and kill the caller's own
+        # process group.
+        proc.pid = 12345678
         proc.stdout = TestAntigravityCLIProvider._reader(
-            [json.dumps(e).encode() + b"\n" for e in events]
+            [json.dumps(e).encode() + b"\n" for e in events], stream_limit=stream_limit
         )
         stderr = asyncio.StreamReader()
         stderr.feed_eof()
@@ -432,6 +448,82 @@ class TestAntigravityCLIProvider:
                 },
             },
             self._result_event(response=""),
+        ]
+        monkeypatch.setattr(
+            "asyncio.create_subprocess_exec",
+            AsyncMock(return_value=self._fake_agy_proc(events)),
+        )
+        provider = AntigravityCLIProvider(LLMConfig(provider="antigravity-cli"))
+
+        text, usage = await provider._run_antigravity("prompt")
+
+        assert text == '{"ok": true}'
+        assert usage == {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_output_tokens": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_result_envelope_larger_than_default_stream_limit_is_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The terminal result event carries the whole review on one NDJSON
+        # line; with asyncio's default 64 KiB stream-reader limit that line
+        # raises ValueError and aborts a valid call. The subprocess must be
+        # spawned with a raised limit, and the reader must digest envelopes
+        # larger than the default.
+        big_response = "x" * (70 * 1024)
+        events = [
+            self._result_event(
+                response=big_response, usage={"input_tokens": 10, "output_tokens": 5}
+            ),
+        ]
+        spawn = AsyncMock(
+            return_value=self._fake_agy_proc(events, stream_limit=_STREAM_LIMIT)
+        )
+        monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+        provider = AntigravityCLIProvider(LLMConfig(provider="antigravity-cli"))
+
+        text, usage = await provider._run_antigravity("prompt")
+
+        assert text == big_response
+        assert usage["output_tokens"] == 5
+        await_args = spawn.await_args
+        assert await_args is not None
+        assert await_args.kwargs["limit"] == _STREAM_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_error_status_envelope_raises_despite_zero_exit_code(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The result envelope's status is authoritative: agy can exit 0 while
+        # reporting a failed turn, which must raise inside the retry boundary
+        # instead of returning an empty response as success.
+        events = [
+            self._result_event(response="", status="ERROR", error="quota exceeded"),
+        ]
+        # A fresh fake process per retry attempt: tenacity re-runs the whole
+        # call, and a reused process would hand attempt 2 an already-drained
+        # stream that looks like a successful empty call.
+        spawn = AsyncMock(side_effect=lambda *a, **k: self._fake_agy_proc(events))
+        monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+        provider = AntigravityCLIProvider(LLMConfig(provider="antigravity-cli"))
+
+        with pytest.raises(LLMError, match="quota exceeded"):
+            await provider._run_antigravity("prompt")
+
+    @pytest.mark.asyncio
+    async def test_missing_status_in_envelope_still_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Older CLI builds may omit the status field — the call must not fail.
+        events = [
+            {
+                "event": "result",
+                "result": {"response": '{"ok": true}', "usage": {}},
+            },
         ]
         monkeypatch.setattr(
             "asyncio.create_subprocess_exec",
