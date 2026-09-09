@@ -4,6 +4,12 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0-compare2] — 2026-09-09
+
+### Fixed
+
+- **Self-review fixes (PR #10, 3 of 4 findings valid).** The compare-provider dropdown crashed the Models page (Radix forbids `value=""` on SelectItem; the active provider round-trips via an `__active__` sentinel); overlap counting let several compare findings each claim the same main finding (shared now counts matched MAIN findings); main reviews never recorded their model on the review event (both entry points pass the resolved review model now).
+
 ## [0.9.0-compare1] — 2026-09-09
 
 ### Added
