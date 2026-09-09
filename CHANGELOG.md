@@ -4,6 +4,19 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0-models1] — 2026-09-09
+
+### Added
+
+- **Per-task reasoning efforts.** The Models settings page now carries a separate reasoning-effort selector for indexing, review, and security (previously one shared selector covered review + security, and indexing never had one — it still defaults to no reasoning). New `llm.indexing_reasoning_effort` / `llm.security_reasoning_effort` config keys; the security pass falls back to `review_reasoning_effort` when unset, so existing deployments behave exactly as before. The Codex CLI provider now honors the effort too (`-c model_reasoning_effort=…`, xhigh/max clamped to high) instead of silently ignoring it.
+- **Live model catalog for the Antigravity CLI backend.** The model dropdowns fetch `agy models` (cached for an hour; the bundled registry remains the offline fallback), so the picker lists the models the subscription actually serves — Gemini Flash/Pro tiers with their effort suffixes, Claude, GPT-OSS — instead of a single "default" entry. The Codex CLI dropdown gains explicit `gpt-5.1-codex` / `gpt-5.1-codex-mini` entries alongside the default.
+- **Effort levels filtered per backend.** CLI backends offer off…high (xhigh/max were silently clamped to high), Bedrock drops xhigh (it never mapped to a thinking budget), OpenRouter and OpenAI-compatible endpoints keep all levels; a per-backend hint under the form explains how the level reaches the provider.
+
+### Fixed
+
+- **agy: `--effort` is no longer sent alongside an explicit `--model`.** The CLI hard-errors on that combination — named models carry their reasoning level in the id (`gemini-*-high/-medium/-low`, "(Thinking)" builds) — so a stored effort used to turn every explicit-model call into an error. The flag now applies only when the CLI picks the model itself (the "Inherit" default).
+- **Models page clarity.** The OpenAI protocol selector is hidden for CLI backends (it never applied to them), each task block flags when a dashboard override shadows `mira.yaml`, and the header names the active backend.
+
 ## [0.8.0] — 2026-07-27
 
 ### Added
