@@ -152,17 +152,12 @@ async def run_pr_review(
         logger.info("Review already in progress for %s, skipping", pr_url)
         return
 
-    progress_key = _begin_progress(repo_full, number, pr_title, pr_url)
     config = load_config()
     from mira.dashboard.models_config import llm_config_for
 
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
     security_llm = create_llm(llm_config_for("security", config.llm))
-    # Not `provider` — that name is the platform provider parameter, and
-    # shadowing it here would hand the engine an LLM provider instead.
-    for llm_tier in (llm, indexing_llm, security_llm):
-        llm_tier.progress_key = progress_key  # type: ignore[attr-defined]
     engine = ReviewEngine(
         config=config,
         llm=llm,
@@ -185,6 +180,15 @@ async def run_pr_review(
     is_indexed = bool(repo_record and repo_record.status == "ready")
 
     logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
+
+    # Register only after the fallible setup above: a config/LLM/DB failure
+    # here must not leave a forever-"running" job (running entries are never
+    # TTL-evicted). Everything after this point is guarded below.
+    progress_key = _begin_progress(repo_full, number, pr_title, pr_url)
+    # Not `provider` — that name is the platform provider parameter, and
+    # shadowing it here would hand the engine an LLM provider instead.
+    for llm_tier in (llm, indexing_llm, security_llm):
+        llm_tier.progress_key = progress_key  # type: ignore[attr-defined]
     try:
         result = await engine.review_pr(pr_url)
         review_tracker.complete(repo_full, number)

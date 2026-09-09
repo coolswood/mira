@@ -383,6 +383,23 @@ class ProgressTracker:
             self._evict_locked()
             return sorted(self._jobs.values(), key=lambda j: j.started_at)
 
+    def snapshot_all(self) -> list[dict]:
+        """Serialized snapshots taken under the lock.
+
+        HTTP handlers must render from these, not from the live objects
+        returned by ``get_all``/``get_active``: worker threads mutate jobs
+        concurrently, and iterating a job's deque/dicts while a writer
+        appends raises RuntimeError mid-request.
+        """
+        with self._lock:
+            self._evict_locked()
+            return [j.as_dict() for j in sorted(self._jobs.values(), key=lambda j: j.started_at)]
+
+    def snapshot_active(self) -> list[dict]:
+        with self._lock:
+            self._evict_locked()
+            return [j.as_dict() for j in self._jobs.values() if j.status == "running"]
+
     def __iter__(self) -> Iterator[JobProgress]:
         return iter(self.get_all())
 

@@ -569,6 +569,10 @@ async def _run_initial_indexing(default_mode: str) -> None:
             # crashing on an empty auth header.
             logger.warning("Skipping initial index of %s — no %s token", full_name, platform)
             continue
+        # Assigned before the try: an early failure (DB status write, tracker
+        # start) must not hit the handlers below with an unbound local — and
+        # tracker.finish/fail(None) are no-ops, so unassigned stays safe.
+        progress_key: str | None = None
         try:
             from mira.core.progress import INDEXING, indexing_key
             from mira.core.progress import tracker as progress_tracker

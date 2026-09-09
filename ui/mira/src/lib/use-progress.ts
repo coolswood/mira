@@ -29,14 +29,22 @@ export function useJobProgress() {
         .then((snapshot) => {
           if (cancelled) return
           setJobs(snapshot)
-          // Seed the per-job feeds from the tracker's stored events; SSE
-          // events append on top as they arrive.
+          // Reconcile every feed from the snapshot so the 30s re-sync repairs
+          // events dropped by an SSE disconnect. Live SSE events fresher than
+          // the snapshot (racing the in-flight response) survive the merge.
           setRecentEvents((prev) => {
             const next = { ...prev }
             for (const job of snapshot) {
-              if (!next[job.key]) {
-                next[job.key] = job.events.slice(-MAX_EVENTS_PER_JOB)
-              }
+              const seeded = job.events.slice(-MAX_EVENTS_PER_JOB)
+              const lastSeededTs = seeded.length
+                ? seeded[seeded.length - 1].ts
+                : 0
+              const liveTail = (prev[job.key] ?? []).filter(
+                (e) => e.ts > lastSeededTs
+              )
+              next[job.key] = [...seeded, ...liveTail].slice(
+                -MAX_EVENTS_PER_JOB
+              )
             }
             return next
           })

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 
 import pytest
@@ -252,3 +253,59 @@ class TestTtlEviction:
         job.started_at = time.time() - 9999
 
         assert tracker.get("a#1") is not None
+
+
+class TestLockedSnapshots:
+    """snapshot_all/snapshot_active serialize under the lock. HTTP endpoints
+    must render from these — live JobProgress objects are mutated by worker
+    threads while a response is being built."""
+
+    def test_snapshots_are_dicts_and_filtered(self):
+        tracker = ProgressTracker()
+        tracker.begin("a#1", REVIEW, "a", pr_number=1)
+        tracker.begin("index:a", INDEXING, "a")
+        tracker.finish("index:a")
+
+        all_snaps = tracker.snapshot_all()
+        active_snaps = tracker.snapshot_active()
+
+        assert [j["key"] for j in all_snaps] == ["a#1", "index:a"]
+        assert [j["key"] for j in active_snaps] == ["a#1"]
+        assert all(isinstance(j, dict) for j in all_snaps + active_snaps)
+        assert all_snaps[1]["status"] == "completed"
+        assert isinstance(all_snaps[0]["events"], list)
+
+    def test_snapshot_keys_match_as_dict(self):
+        tracker = ProgressTracker()
+        tracker.begin("a#1", REVIEW, "a", pr_number=1, pr_title="t")
+        tracker.plan_chunks("a#1", 3)
+
+        snap = tracker.snapshot_active()[0]
+        job = tracker.get("a#1")
+        assert job is not None
+        assert set(snap) == set(job.as_dict())
+
+    def test_snapshot_under_concurrent_event_writes(self):
+        """Regression: serializing live objects outside the lock can raise
+        'deque mutated during iteration' when workers append events."""
+
+        tracker = ProgressTracker()
+        tracker.begin("a#1", REVIEW, "a", pr_number=1)
+        stop = threading.Event()
+
+        def hammer():
+            i = 0
+            while not stop.is_set():
+                tracker.add_event("a#1", "call_item", f"e{i}")
+                i += 1
+
+        worker = threading.Thread(target=hammer)
+        worker.start()
+        try:
+            for _ in range(300):
+                snaps = tracker.snapshot_active()
+                assert len(snaps) == 1
+                assert snaps[0]["key"] == "a#1"
+        finally:
+            stop.set()
+            worker.join()
