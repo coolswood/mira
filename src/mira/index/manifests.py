@@ -1,10 +1,10 @@
 """Deterministic parsers for package manifest files.
 
 Covers the common formats — package.json, requirements.txt, pyproject.toml,
-go.mod, Dockerfile. Unlike LLM-based extraction, these parsers are precise,
-zero-cost at inference time, and don't hallucinate versions. Each parser
-returns a list of ``ParsedPackage`` entries; a dispatcher matches file paths
-to the right parser.
+go.mod, Dockerfile, pubspec.yaml. Unlike LLM-based extraction, these parsers
+are precise, zero-cost at inference time, and don't hallucinate versions.
+Each parser returns a list of ``ParsedPackage`` entries; a dispatcher matches
+file paths to the right parser.
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,7 @@ class ParsedPackage:
     """A single dependency declared in a manifest file."""
 
     name: str
-    kind: str  # "npm" | "pip" | "docker" | "go" | "rust"
+    kind: str  # "npm" | "pip" | "docker" | "go" | "rust" | "pub"
     version: str  # raw constraint as written ("^4.18.0", ">=2.0", "4.18.0", etc.)
     file_path: str
     is_dev: bool = False
@@ -464,6 +466,90 @@ def parse_package_lock_json(content: str, file_path: str) -> list[ParsedPackage]
     return out
 
 
+# ── pubspec.yaml / pubspec.lock (Dart/Flutter) ──
+
+
+def parse_pubspec_yaml(content: str, file_path: str) -> list[ParsedPackage]:
+    """Parse a `pubspec.yaml` (Dart/Flutter manifest).
+
+    Records hosted dependencies with a version constraint. SDK deps (`flutter`),
+    path and git dependencies carry no version constraint and are skipped —
+    OSV.dev can't match them anyway.
+    """
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        logger.debug("Skipping %s (invalid YAML): %s", file_path, exc)
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    out: list[ParsedPackage] = []
+    for section, is_dev in (("dependencies", False), ("dev_dependencies", True)):
+        block = data.get(section)
+        if not isinstance(block, dict):
+            continue
+        for name, spec in block.items():
+            if not isinstance(name, str) or not name:
+                continue
+            version = ""
+            if isinstance(spec, str):
+                version = spec.strip()
+            elif isinstance(spec, dict) and isinstance(spec.get("version"), str):
+                # hosted deps: `dio: {version: ^5.0.0}` — git/path/sdk have none
+                version = spec["version"].strip()
+            if not version:
+                continue
+            out.append(
+                ParsedPackage(
+                    name=name,
+                    kind="pub",
+                    version=version,
+                    file_path=file_path,
+                    is_dev=is_dev,
+                )
+            )
+    return out
+
+
+def parse_pubspec_lock(content: str, file_path: str) -> list[ParsedPackage]:
+    """Parse a `pubspec.lock` (Dart/Flutter lockfile).
+
+    Flat ``packages`` map; each entry has a resolved ``version`` and a
+    ``dependency`` kind ("direct main" / "direct dev" / "transitive").
+    Transitive entries are kept — that's where CVEs usually hide.
+    """
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        logger.debug("Skipping %s (invalid YAML): %s", file_path, exc)
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    packages = data.get("packages")
+    if not isinstance(packages, dict):
+        return []
+
+    out: list[ParsedPackage] = []
+    for name, info in packages.items():
+        if not isinstance(name, str) or not isinstance(info, dict):
+            continue
+        version = info.get("version")
+        if not isinstance(version, str) or not version:
+            continue
+        out.append(
+            ParsedPackage(
+                name=name,
+                kind="pub",
+                version=version.strip(),
+                file_path=file_path,
+                is_dev=info.get("dependency") == "direct dev",
+            )
+        )
+    return out
+
+
 # ── Dispatch ──
 
 _PARSERS: list[tuple[re.Pattern[str], object]] = [
@@ -473,18 +559,22 @@ _PARSERS: list[tuple[re.Pattern[str], object]] = [
     (re.compile(r"(^|/)poetry\.lock$"), parse_poetry_lock),
     (re.compile(r"(^|/)composer\.lock$"), parse_composer_lock),
     (re.compile(r"(^|/)package-lock\.json$"), parse_package_lock_json),
+    (re.compile(r"(^|/)pubspec\.lock$"), parse_pubspec_lock),
     (re.compile(r"(^|/)package\.json$"), parse_package_json),
     (re.compile(r"(^|/)requirements[^/]*\.txt$"), parse_requirements_txt),
     (re.compile(r"(^|/)pyproject\.toml$"), parse_pyproject_toml),
     (re.compile(r"(^|/)go\.mod$"), parse_go_mod),
     (re.compile(r"(^|/)composer\.json$"), parse_composer_json),
+    (re.compile(r"(^|/)pubspec\.yaml$"), parse_pubspec_yaml),
     (re.compile(r"(^|/)(Dockerfile|[^/]+\.Dockerfile)$"), parse_dockerfile),
 ]
 
 
 def _is_lockfile_path(path: str) -> bool:
     """Heuristic — does this path look like a lockfile (resolved versions)?"""
-    return bool(re.search(r"(^|/)(uv|poetry|composer)\.lock$|(^|/)package-lock\.json$", path))
+    return bool(
+        re.search(r"(^|/)(uv|poetry|composer|pubspec)\.lock$|(^|/)package-lock\.json$", path)
+    )
 
 
 def is_manifest(path: str) -> bool:
