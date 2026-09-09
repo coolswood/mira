@@ -117,6 +117,29 @@ class TestReviewWorkUnits:
         # Two of four chunks took 60s -> ~60s remaining (capped at elapsed).
         assert eta <= 61
 
+    def test_out_of_order_chunk_completion_counts_completions(self):
+        # Chunks run concurrently and finish out of order; the counter must
+        # track how many finished, not the highest finished index — otherwise
+        # an early finisher of the last chunk fakes 100% and kills the ETA
+        # while earlier chunks are still in flight.
+        tracker = ProgressTracker()
+        key = review_key("acme", "api", 10)
+        tracker.begin(key, REVIEW, "acme/api", pr_number=10)
+        tracker.plan_chunks(key, 3)
+
+        tracker.chunk_finished(key, 3, comments=1)
+
+        job = tracker.get(key)
+        assert job is not None
+        assert job.chunks_done == 1
+
+        tracker.chunk_finished(key, 1)
+        tracker.chunk_finished(key, 2)
+
+        job = tracker.get(key)
+        assert job is not None
+        assert job.chunks_done == 3
+
     def test_eta_is_none_without_chunks(self):
         tracker = ProgressTracker()
         tracker.begin("a#1", REVIEW, "a", pr_number=1)
