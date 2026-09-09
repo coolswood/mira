@@ -116,6 +116,11 @@ CREATE TABLE IF NOT EXISTS review_events (
     -- Mirrors IndexStore.review_events: 'completed' | 'failed' + safe summary.
     status TEXT NOT NULL DEFAULT 'completed',
     error TEXT NOT NULL DEFAULT '',
+    -- Model attribution (mirrors IndexStore): model id, 'review'|'compare'
+    -- kind, and the PR head the pass reviewed.
+    model TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'review',
+    head_sha TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 
@@ -286,6 +291,19 @@ def _get_conn(url: str) -> Any:
                 cur.execute(
                     "ALTER TABLE review_events ADD COLUMN IF NOT EXISTS status "
                     "TEXT NOT NULL DEFAULT 'completed'"
+                )
+                # Model-attribution columns (mirrors IndexStore defaults).
+                cur.execute(
+                    "ALTER TABLE review_events ADD COLUMN IF NOT EXISTS model "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+                cur.execute(
+                    "ALTER TABLE review_events ADD COLUMN IF NOT EXISTS kind "
+                    "TEXT NOT NULL DEFAULT 'review'"
+                )
+                cur.execute(
+                    "ALTER TABLE review_events ADD COLUMN IF NOT EXISTS head_sha "
+                    "TEXT NOT NULL DEFAULT ''"
                 )
                 cur.execute(
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS status "
@@ -802,6 +820,9 @@ class PgIndexStore(_StoreSharedMixin):
         author: str = "",
         author_avatar_url: str = "",
         reviewed_paths: str = "",
+        model: str = "",
+        kind: str = "review",
+        head_sha: str = "",
     ) -> ReviewEvent:
         now = created_at if created_at is not None else time.time()
         with self._cursor() as cur:
@@ -809,8 +830,9 @@ class PgIndexStore(_StoreSharedMixin):
                 "INSERT INTO review_events (owner, repo, pr_number, pr_title, pr_url, "
                 "comments_posted, blockers, warnings, suggestions, files_reviewed, "
                 "lines_changed, tokens_used, duration_ms, categories, author, "
-                "author_avatar_url, reviewed_paths, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "author_avatar_url, reviewed_paths, model, kind, head_sha, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                "%s, %s, %s, %s, %s, %s) "
                 "RETURNING id",
                 (
                     self._owner,
@@ -830,6 +852,9 @@ class PgIndexStore(_StoreSharedMixin):
                     author,
                     author_avatar_url,
                     reviewed_paths,
+                    model,
+                    kind,
+                    head_sha,
                     now,
                 ),
             )
@@ -852,6 +877,9 @@ class PgIndexStore(_StoreSharedMixin):
             author=author,
             author_avatar_url=author_avatar_url,
             reviewed_paths=reviewed_paths,
+            model=model,
+            kind=kind,
+            head_sha=head_sha,
         )
 
     def record_review_failure(
@@ -862,6 +890,9 @@ class PgIndexStore(_StoreSharedMixin):
         error: str,
         author: str = "",
         created_at: float | None = None,
+        model: str = "",
+        kind: str = "review",
+        head_sha: str = "",
     ) -> ReviewEvent:
         """Persist a crashed review pass (status='failed', counters zeroed).
 
@@ -871,8 +902,8 @@ class PgIndexStore(_StoreSharedMixin):
         with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO review_events (owner, repo, pr_number, pr_title, pr_url, "
-                "status, error, author, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, 'failed', %s, %s, %s) RETURNING id",
+                "status, error, author, model, kind, head_sha, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, 'failed', %s, %s, %s, %s, %s, %s) RETURNING id",
                 (
                     self._owner,
                     self._repo,
@@ -881,6 +912,9 @@ class PgIndexStore(_StoreSharedMixin):
                     pr_url,
                     error,
                     author,
+                    model,
+                    kind,
+                    head_sha,
                     now,
                 ),
             )
@@ -905,6 +939,9 @@ class PgIndexStore(_StoreSharedMixin):
             reviewed_paths="",
             status="failed",
             error=error,
+            model=model,
+            kind=kind,
+            head_sha=head_sha,
         )
 
     def upsert_pr_fingerprint(self, fp: PRFingerprint) -> None:
@@ -957,7 +994,8 @@ class PgIndexStore(_StoreSharedMixin):
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author, author_avatar_url, reviewed_paths, status, error "
+            "categories, created_at, author, author_avatar_url, reviewed_paths, status, "
+            "error, model, kind, head_sha "
             "FROM review_events WHERE owner=%s AND repo=%s "
             "ORDER BY created_at DESC LIMIT %s",
             (self._owner, self._repo, limit),
@@ -983,6 +1021,9 @@ class PgIndexStore(_StoreSharedMixin):
                 reviewed_paths=r[16],
                 status=r[17] or "completed",
                 error=r[18] or "",
+                model=r[19] or "",
+                kind=r[20] or "review",
+                head_sha=r[21] or "",
             )
             for r in rows
         ]
@@ -991,7 +1032,8 @@ class PgIndexStore(_StoreSharedMixin):
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author, author_avatar_url, reviewed_paths, status, error "
+            "categories, created_at, author, author_avatar_url, reviewed_paths, status, "
+            "error, model, kind, head_sha "
             "FROM review_events WHERE owner=%s AND repo=%s AND pr_number=%s "
             "ORDER BY created_at DESC",
             (self._owner, self._repo, pr_number),
@@ -1017,6 +1059,9 @@ class PgIndexStore(_StoreSharedMixin):
                 reviewed_paths=r[16],
                 status=r[17] or "completed",
                 error=r[18] or "",
+                model=r[19] or "",
+                kind=r[20] or "review",
+                head_sha=r[21] or "",
             )
             for r in rows
         ]
@@ -1164,7 +1209,8 @@ class PgIndexStore(_StoreSharedMixin):
             "COALESCE(SUM(warnings),0), COALESCE(SUM(suggestions),0), "
             "COALESCE(SUM(files_reviewed),0), COALESCE(SUM(lines_changed),0), "
             "COALESCE(SUM(tokens_used),0), COALESCE(AVG(duration_ms),0) "
-            "FROM review_events WHERE owner=%s AND repo=%s AND status != 'failed'"
+            "FROM review_events WHERE owner=%s AND repo=%s AND status != 'failed' "
+            "AND kind != 'compare'"
             f"{since_clause}",
             tuple(params),
         )
@@ -1174,7 +1220,8 @@ class PgIndexStore(_StoreSharedMixin):
             cat_params.append(since)
         cat_rows = self._fetchall(
             "SELECT categories FROM review_events "
-            "WHERE owner=%s AND repo=%s AND categories != '' AND status != 'failed'"
+            "WHERE owner=%s AND repo=%s AND categories != '' AND status != 'failed' "
+            "AND kind != 'compare'"
             f"{since_clause}",
             tuple(cat_params),
         )

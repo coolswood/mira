@@ -35,6 +35,9 @@ _FILES_EVENT_EVERY = 25
 # Job kinds.
 REVIEW = "review"
 INDEXING = "indexing"
+# Shadow review pass from the parallel-model comparison feature: same stage
+# machine as REVIEW, but nothing is posted to the platform.
+COMPARE = "compare"
 
 # Review stages (engine pipeline order; security/dependency pass in parallel
 # with chunks, so their transitions appear in the event log but do not rewind
@@ -52,6 +55,16 @@ STAGE_DIRECTORIES = "directories"  # indexing: directory summaries
 
 def review_key(owner: str, repo: str, pr_number: int) -> str:
     return f"{owner}/{repo}#{pr_number}"
+
+
+def compare_key(owner: str, repo: str, pr_number: int, label: str) -> str:
+    """Progress key for a shadow compare pass.
+
+    The label (compare model id) suffixes the review key so several parallel
+    compare jobs for one PR coexist — `begin()` overwrites by key, so sharing
+    the plain review key would clobber the main review's job.
+    """
+    return f"{review_key(owner, repo, pr_number)}:cmp:{label}"
 
 
 def indexing_key(owner: str, repo: str) -> str:
@@ -114,7 +127,7 @@ class JobProgress:
 
     def eta_s(self) -> float | None:
         """Estimated seconds remaining, based on finished chunks (reviews only)."""
-        if self.kind != REVIEW or self.chunks_total <= 0 or self.chunks_done <= 0:
+        if self.kind not in (REVIEW, COMPARE) or self.chunks_total <= 0 or self.chunks_done <= 0:
             return None
         if self.chunks_done >= self.chunks_total:
             return None

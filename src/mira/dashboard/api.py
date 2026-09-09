@@ -206,6 +206,12 @@ class ReviewEventModel(BaseModel):
     # Activities feed can surface silent review failures.
     status: str = "completed"
     error: str = ""
+    # Model attribution ('' on rows written before the column existed) and
+    # pass kind: 'review' = posted to the platform, 'compare' = shadow pass
+    # from the parallel-model comparison feature (posted nothing).
+    model: str = ""
+    kind: str = "review"
+    head_sha: str = ""
 
 
 class ActivityEventModel(ReviewEventModel):
@@ -261,6 +267,55 @@ class ActivityDetailModel(BaseModel):
     author_avatar_url: str = ""
     reviews: list[ActivityReviewModel]
     replies: list[PRReplyModel]
+
+
+# ── Parallel-model comparison ────────────────────────────────────────────────
+
+
+class CompareOverlapModel(BaseModel):
+    """Finding overlap of one compare pass against the round's main pass.
+
+    Duplication is judged with the same `_is_duplicate` clustering the
+    ensemble merge uses — same file + overlapping lines + similar title, or
+    near-identical title/body across files.
+    """
+
+    model: str
+    shared: int  # both models found it
+    only_main: int  # the main review model found it, this one missed it
+    only_compare: int  # unique to this comparison model
+
+
+class ComparePassModel(BaseModel):
+    review_id: int
+    kind: str  # "review" (main) | "compare" (shadow)
+    model: str
+    status: str
+    error: str = ""
+    blockers: int
+    warnings: int
+    suggestions: int
+    files_reviewed: int
+    tokens_used: int
+    duration_ms: int
+    created_at: float
+    comments: list[ReviewCommentModel] = []
+
+
+class CompareRoundModel(BaseModel):
+    head_sha: str
+    created_at: float
+    passes: list[ComparePassModel]
+    overlaps: list[CompareOverlapModel] = []
+
+
+class CompareDetailModel(BaseModel):
+    owner: str
+    repo: str
+    pr_number: int
+    pr_title: str
+    pr_url: str
+    rounds: list[CompareRoundModel]
 
 
 class ReviewStatsModel(BaseModel):
@@ -401,6 +456,23 @@ class ModelOption(BaseModel):
     recommended: bool = False
 
 
+class CompareModelEntry(BaseModel):
+    """One parallel-comparison model row on the Models page."""
+
+    provider: str = ""  # catalog backend; "" = active provider
+    model: str
+    reasoning_effort: str = "off"
+
+
+class CompareProviderOptions(BaseModel):
+    """Model/effort dropdown options for one selectable compare backend."""
+
+    backend: str
+    label: str
+    options: list[ModelOption]
+    effort_levels: list[ModelOption]
+
+
 class ModelsResponse(BaseModel):
     indexing_model: str
     review_model: str
@@ -429,6 +501,13 @@ class ModelsResponse(BaseModel):
     # resolved DB → config → default. Mirrors review_thinking_mode.
     api_style: str
     api_style_options: list[ModelOption]
+    # Parallel-model comparison: the configured shadow list, where it comes
+    # from, the dropdown options per selectable backend, and the size cap the
+    # backend enforces (each entry reviews every PR).
+    compare_models: list[CompareModelEntry]
+    compare_source: str  # "dashboard" | "config"
+    compare_providers: list[CompareProviderOptions]
+    compare_max: int
 
 
 class ModelsUpdate(BaseModel):
@@ -439,6 +518,7 @@ class ModelsUpdate(BaseModel):
     indexing_thinking_mode: str = "off"
     security_thinking_mode: str = "off"
     api_style: str = "chat"
+    compare_models: list[CompareModelEntry] = []
 
 
 class GlobalSettingsResponse(BaseModel):
@@ -1419,6 +1499,9 @@ def get_activity_detail(owner: str, repo: str, pr_number: int) -> ActivityDetail
                 error=e.error,
                 reviewed_paths=_paths(e.reviewed_paths),
                 comments=comments_by_review.get(e.id, []),
+                model=e.model,
+                kind=e.kind,
+                head_sha=e.head_sha,
             )
             for e in all_events
         ]
@@ -1449,6 +1532,139 @@ def get_activity_detail(owner: str, repo: str, pr_number: int) -> ActivityDetail
             reviews=reviews,
             replies=replies,
         )
+
+
+@router.get("/api/activity/{owner}/{repo}/{pr_number}/compare", response_model=CompareDetailModel)
+def get_activity_compare(owner: str, repo: str, pr_number: int) -> CompareDetailModel:
+    """Side-by-side model comparison for one PR: passes grouped into rounds
+    by the reviewed head SHA, with each compare pass's finding overlap
+    against the round's main pass."""
+    from dataclasses import dataclass
+
+    from mira.core.noise_filter import _is_duplicate
+
+    with _open_store(owner, repo) as store:
+        all_events = store.list_review_events_for_pr(pr_number)
+        marker = f"/{owner}/{repo}/"
+        all_events = [e for e in all_events if not e.pr_url or marker in e.pr_url]
+        if not all_events:
+            raise HTTPException(status_code=404, detail="No reviews for this PR")
+
+        comments_by_review: dict[int, list[ReviewCommentModel]] = {}
+        for c in store.list_review_comments(pr_number):
+            comments_by_review.setdefault(c.review_id, []).append(
+                ReviewCommentModel(
+                    id=c.id,
+                    review_id=c.review_id,
+                    path=c.path,
+                    line=c.line,
+                    severity=c.severity,
+                    category=c.category,
+                    title=c.title,
+                    body=c.body,
+                    github_comment_id=c.github_comment_id,
+                    created_at=c.created_at,
+                )
+            )
+        latest = all_events[0]
+
+    @dataclass
+    class _Shim:
+        """Attribute surface `_is_duplicate` needs (ReviewComment minus the rest)."""
+
+        path: str
+        line: int
+        end_line: int
+        title: str
+        body: str
+        category: str
+
+    def _shim(c: ReviewCommentModel) -> _Shim:
+        return _Shim(c.path, c.line, c.line, c.title, c.body, c.category)
+
+    # Group passes into rounds. Rows before the head_sha column have no
+    # anchor — each becomes its own legacy round keyed by review id.
+    rounds: dict[str, dict] = {}
+    for e in all_events:
+        key = e.head_sha or f"legacy:{e.id}"
+        rounds.setdefault(key, {"head_sha": e.head_sha, "events": []})
+        rounds[key]["events"].append(e)
+
+    round_models: list[CompareRoundModel] = []
+    for key, group in rounds.items():
+        events = sorted(group["events"], key=lambda e: e.created_at, reverse=True)
+        # The round's main pass is the newest non-compare event; rounds that
+        # predate the comparison feature (or where main crashed) simply have
+        # no overlaps.
+        main_event = next((e for e in events if e.kind != "compare"), None)
+        main_shims = (
+            [_shim(c) for c in comments_by_review.get(main_event.id, [])] if main_event else []
+        )
+        overlaps: list[CompareOverlapModel] = []
+        passes: list[ComparePassModel] = []
+        for e in events:
+            comments = comments_by_review.get(e.id, [])
+            if e.kind == "compare" and main_event is not None and e.status == "completed":
+                compare_shims = [_shim(c) for c in comments]
+                # One compare finding may duplicate several near-identical
+                # main findings (and vice versa), so shared counts matched
+                # MAIN findings (unique) while only_compare counts compare
+                # findings with no main match at all — neither counter can
+                # go negative or double-count a single main finding.
+                matched_main: set[int] = set()
+                matched_compare = 0
+                for c_shim in compare_shims:
+                    hit = False
+                    for i, m_shim in enumerate(main_shims):
+                        if _is_duplicate(c_shim, m_shim):
+                            matched_main.add(i)
+                            hit = True
+                    if hit:
+                        matched_compare += 1
+                overlaps.append(
+                    CompareOverlapModel(
+                        model=e.model or f"review #{e.id}",
+                        shared=len(matched_main),
+                        only_main=len(main_shims) - len(matched_main),
+                        only_compare=len(compare_shims) - matched_compare,
+                    )
+                )
+            passes.append(
+                ComparePassModel(
+                    review_id=e.id,
+                    kind=e.kind,
+                    model=e.model,
+                    status=e.status,
+                    error=e.error,
+                    blockers=e.blockers,
+                    warnings=e.warnings,
+                    suggestions=e.suggestions,
+                    files_reviewed=e.files_reviewed,
+                    tokens_used=e.tokens_used,
+                    duration_ms=e.duration_ms,
+                    created_at=e.created_at,
+                    comments=comments,
+                )
+            )
+
+        round_models.append(
+            CompareRoundModel(
+                head_sha=group["head_sha"] or key,
+                created_at=events[0].created_at,
+                passes=passes,
+                overlaps=overlaps,
+            )
+        )
+
+    round_models.sort(key=lambda r: r.created_at, reverse=True)
+    return CompareDetailModel(
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        pr_title=latest.pr_title,
+        pr_url=latest.pr_url,
+        rounds=round_models,
+    )
 
 
 # Wire dashboard routes + middleware onto the standalone app, after all

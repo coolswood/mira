@@ -169,6 +169,11 @@ export interface ReviewEventModel {
   // crashed — `error` then carries a safe summary of what went wrong.
   status: string
   error: string
+  // Model attribution ("" on legacy rows) and pass kind: "review" = posted
+  // to the platform, "compare" = shadow pass from model comparison.
+  model: string
+  kind: string
+  head_sha: string
 }
 
 export interface ActivityEventModel extends ReviewEventModel {
@@ -222,6 +227,47 @@ export interface ActivityDetailModel {
   author_avatar_url: string
   reviews: ActivityReviewModel[]
   replies: PRReplyModel[]
+}
+
+// ── Parallel-model comparison ────────────────────────────────────────────────
+
+export interface CompareOverlapModel {
+  model: string
+  shared: number
+  only_main: number
+  only_compare: number
+}
+
+export interface ComparePassModel {
+  review_id: number
+  kind: string
+  model: string
+  status: string
+  error: string
+  blockers: number
+  warnings: number
+  suggestions: number
+  files_reviewed: number
+  tokens_used: number
+  duration_ms: number
+  created_at: number
+  comments: ReviewCommentModel[]
+}
+
+export interface CompareRoundModel {
+  head_sha: string
+  created_at: number
+  passes: ComparePassModel[]
+  overlaps: CompareOverlapModel[]
+}
+
+export interface CompareDetailModel {
+  owner: string
+  repo: string
+  pr_number: number
+  pr_title: string
+  pr_url: string
+  rounds: CompareRoundModel[]
 }
 
 export interface ReviewStatsModel {

@@ -1,4 +1,4 @@
-import { Loader2 } from "lucide-react"
+import { Loader2, Plus, X } from "lucide-react"
 import { useEffect, useState } from "react"
 
 import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
@@ -21,6 +21,10 @@ import {
 import { useParams } from "react-router"
 
 import { api } from "@/lib/api"
+import type {
+  CompareModelEntry,
+  CompareProviderOptions,
+} from "@/lib/api/settings"
 import { useAuth } from "@/lib/auth"
 import { useDocumentTitle } from "@/lib/hooks"
 
@@ -35,6 +39,10 @@ const BACKEND_LABELS: Record<string, string> = {
 // Backends that shell out to a CLI per call — the OpenAI protocol selector
 // doesn't apply to them.
 const CLI_BACKENDS = new Set(["codex-cli", "antigravity-cli"])
+
+// Sentinel for the compare-provider Select: the active provider is stored as
+// "" in entries, but Radix Select forbids an empty SelectItem value.
+const ACTIVE_PROVIDER = "__active__"
 
 export function SettingsPage() {
   useDocumentTitle("Settings")
@@ -62,6 +70,13 @@ export function SettingsPage() {
   const [effortHint, setEffortHint] = useState("")
   const [apiStyle, setApiStyle] = useState("chat")
   const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
+  // Parallel-model comparison: the extra shadow models list.
+  const [compareModels, setCompareModels] = useState<CompareModelEntry[]>([])
+  const [compareProviders, setCompareProviders] = useState<
+    CompareProviderOptions[]
+  >([])
+  const [compareMax, setCompareMax] = useState(3)
+  const [modelsError, setModelsError] = useState("")
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
 
@@ -108,6 +123,9 @@ export function SettingsPage() {
       setEffortHint(m.effort_hint)
       setApiStyle(m.api_style ?? "chat")
       setApiStyleOptions(m.api_style_options ?? [])
+      setCompareModels(m.compare_models ?? [])
+      setCompareProviders(m.compare_providers ?? [])
+      setCompareMax(m.compare_max ?? 3)
     })
     api.getGlobalSettings().then((s) => {
       setEffective(
@@ -133,18 +151,33 @@ export function SettingsPage() {
 
   const saveModels = async () => {
     setSavingModels(true)
-    await api.saveModels({
-      indexing_model: indexingModel,
-      review_model: reviewModel,
-      security_model: securityModel,
-      indexing_thinking_mode: indexingThinking,
-      review_thinking_mode: thinkingMode,
-      security_thinking_mode: securityThinking,
-      api_style: apiStyle,
-    })
-    setSavingModels(false)
-    setModelsSaved(true)
-    setTimeout(() => setModelsSaved(false), 2000)
+    setModelsError("")
+    try {
+      await api.saveModels({
+        indexing_model: indexingModel,
+        review_model: reviewModel,
+        security_model: securityModel,
+        indexing_thinking_mode: indexingThinking,
+        review_thinking_mode: thinkingMode,
+        security_thinking_mode: securityThinking,
+        api_style: apiStyle,
+        compare_models: compareModels,
+      })
+      setModelsSaved(true)
+      setTimeout(() => setModelsSaved(false), 2000)
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err)
+      let detail = raw
+      try {
+        const parsed = JSON.parse(raw.replace(/^API error \d+: /, ""))
+        if (parsed?.detail) detail = String(parsed.detail)
+      } catch {
+        /* keep raw */
+      }
+      setModelsError(detail)
+    } finally {
+      setSavingModels(false)
+    }
   }
 
   // One review-tier block: purpose description + model picker (wide) and
@@ -480,6 +513,124 @@ export function SettingsPage() {
               effort: securityThinking,
               setEffort: setSecurityThinking,
             })}
+            {/* Parallel-model comparison: every listed model shadow-reviews
+                each PR next to the Review model; results are compared in
+                Activity → Compare. */}
+            <div className="space-y-3 rounded-lg border p-4">
+              <div className="space-y-1">
+                <label className="text-sm font-medium">
+                  Parallel review models
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  Each model here reviews every PR alongside the Review model
+                  and posts nothing to GitHub — the results appear side by side
+                  with finding-overlap stats in Activity → Compare. Each entry
+                  costs one extra full review per PR, so the list is capped at{" "}
+                  {compareMax}. Leave empty to keep comparison off.
+                </p>
+              </div>
+              {compareModels.map((entry, i) => {
+                const pData =
+                  compareProviders.find((p) => p.backend === entry.provider) ??
+                  compareProviders[0]
+                const update = (patch: Partial<CompareModelEntry>) =>
+                  setCompareModels((rows) =>
+                    rows.map((r, j) => (j === i ? { ...r, ...patch } : r))
+                  )
+                return (
+                  <div
+                    key={i}
+                    className="grid gap-2 rounded-md border p-3 sm:grid-cols-[10rem_minmax(0,1fr)_9rem_2.5rem] sm:items-end"
+                  >
+                    <div className="space-y-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Provider
+                      </span>
+                      {/* Radix forbids value="" on SelectItem, and the active
+                          provider is stored as "" — round-trip via a sentinel. */}
+                      <Select
+                        value={entry.provider || ACTIVE_PROVIDER}
+                        onValueChange={(v) =>
+                          update({
+                            provider: v === ACTIVE_PROVIDER ? "" : v,
+                            model: "",
+                            reasoning_effort: "off",
+                          })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {compareProviders.map((p) => (
+                            <SelectItem
+                              key={p.backend}
+                              value={p.backend || ACTIVE_PROVIDER}
+                            >
+                              {p.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Model
+                      </span>
+                      <ModelCombobox
+                        value={entry.model}
+                        onChange={(v) => update({ model: v })}
+                        options={pData?.options ?? []}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        Effort
+                      </span>
+                      <Select
+                        value={entry.reasoning_effort || "off"}
+                        onValueChange={(v) => update({ reasoning_effort: v })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(pData?.effort_levels ?? thinkingOptions).map((opt) => (
+                            <SelectItem key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Remove comparison model"
+                      onClick={() =>
+                        setCompareModels((rows) => rows.filter((_, j) => j !== i))
+                      }
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                )
+              })}
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={compareModels.length >= compareMax}
+                onClick={() =>
+                  setCompareModels((rows) => [
+                    ...rows,
+                    { provider: "", model: "", reasoning_effort: "off" },
+                  ])
+                }
+              >
+                <Plus className="mr-2 h-3 w-3" />
+                Add model
+              </Button>
+            </div>
             {effortHint && (
               <p className="text-xs text-muted-foreground">{effortHint}</p>
             )}
@@ -516,6 +667,9 @@ export function SettingsPage() {
                 <span className="text-xs text-muted-foreground">Saved</span>
               )}
             </div>
+            {modelsError && (
+              <p className="text-xs text-destructive">{modelsError}</p>
+            )}
           </CardContent>
         </Card>
       )}
