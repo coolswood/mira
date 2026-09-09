@@ -245,6 +245,14 @@ def check_against_template(
     """
     if template is None or arb.path == template.path:
         return []
+    # Structural mismatch guard: a real locale file shares nearly all keys
+    # with its template. If virtually nothing overlaps, this "template" does
+    # not govern the file (split-fragment source trees, wrong heuristic
+    # guess) and the check would only flood false positives — skip it.
+    if len(arb.entries) >= 8:
+        shared = sum(1 for k in arb.entries if k in template.entries)
+        if shared < len(arb.entries) * 0.2:
+            return []
     findings: list[L10nFinding] = []
     for key in sorted(changed_keys):
         if key in template.entries:
