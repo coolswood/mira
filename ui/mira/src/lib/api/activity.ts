@@ -1,5 +1,9 @@
 import { fetchJson } from "./http"
-import type { ActivityDetailModel, ActivityResponse } from "./types"
+import type {
+  ActivityDetailModel,
+  ActivityResponse,
+  CompareDetailModel,
+} from "./types"
 
 // Org-wide feed of review events across all repos.
 export const activityApi = {
@@ -18,5 +22,12 @@ export const activityApi = {
   getActivityDetail: (owner: string, repo: string, prNumber: number) =>
     fetchJson<ActivityDetailModel>(
       `/api/activity/${owner}/${repo}/${prNumber}`
+    ),
+
+  // Side-by-side model comparison: passes grouped into rounds by head SHA,
+  // with each compare pass's overlap against the round's main pass.
+  getCompareDetail: (owner: string, repo: string, prNumber: number) =>
+    fetchJson<CompareDetailModel>(
+      `/api/activity/${owner}/${repo}/${prNumber}/compare`
     ),
 }

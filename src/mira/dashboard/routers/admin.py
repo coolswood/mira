@@ -11,6 +11,8 @@ from pydantic import BaseModel
 from mira.dashboard import api as _api
 from mira.dashboard.api import (
     _ALLOWED_OVERRIDE_SECTIONS,
+    CompareModelEntry,
+    CompareProviderOptions,
     ForgejoRepoRegister,
     GitLabRepoRegister,
     GlobalSettingsResponse,
@@ -155,7 +157,10 @@ async def get_models() -> ModelsResponse:
     from mira.dashboard.model_catalog import active_backend, build_options, fetch_catalog
     from mira.dashboard.models_config import (
         API_STYLES,
+        COMPARE_MODELS_KEY,
+        MAX_COMPARE_MODELS,
         effort_hint,
+        get_compare_models,
         get_indexing_model,
         get_indexing_thinking_mode,
         get_review_model,
@@ -189,6 +194,54 @@ async def get_models() -> ModelsResponse:
     backend = active_backend(config.llm)
     catalog = await fetch_catalog(config.llm)
 
+    # ── Parallel-model comparison ──
+    compare_entries = get_compare_models(config.llm)
+    db_compare_raw = _api._app_db.get_setting(COMPARE_MODELS_KEY)
+    compare_models = [
+        CompareModelEntry(
+            provider=e.provider,
+            model=e.model,
+            reasoning_effort=e.reasoning_effort or "off",
+        )
+        for e in compare_entries
+    ]
+    # Dropdown options per selectable backend: the active one always (stored
+    # as provider="" in entries); the other CLI backends when their
+    # credentials are configured (a codex entry without codex_home would
+    # just fail auth on every run).
+    compare_providers: list[CompareProviderOptions] = []
+    selectable: list[tuple[str, str, str]] = [("", backend, "Active provider")]
+    if backend != "codex-cli" and config.llm.codex_home:
+        selectable.append(("codex-cli", "codex-cli", "Codex CLI"))
+    if backend != "antigravity-cli" and (
+        config.llm.antigravity_home or config.llm.antigravity_api_key
+    ):
+        selectable.append(("antigravity-cli", "antigravity-cli", "Antigravity CLI"))
+    for select_value, backend_name, label in selectable:
+        if backend_name == backend:
+            backend_catalog = catalog
+        elif backend_name == "antigravity-cli":
+            # fetch_catalog dispatches on the config's provider — point a
+            # copy at agy so the live `agy models` list serves its dropdown.
+            backend_catalog = await fetch_catalog(
+                config.llm.model_copy(update={"provider": "antigravity-cli"})
+            )
+        else:
+            backend_catalog = None  # codex has no list subcommand → registry
+        compare_providers.append(
+            CompareProviderOptions(
+                backend=select_value,
+                label=label,
+                options=[
+                    ModelOption(**m)
+                    for m in build_options(backend_name, backend_catalog, "review")
+                ],
+                effort_levels=[
+                    ModelOption(**m) for m in thinking_modes_for_backend(backend_name)
+                ],
+            )
+        )
+
     return ModelsResponse(
         indexing_model=indexing,
         review_model=review,
@@ -210,6 +263,10 @@ async def get_models() -> ModelsResponse:
         effort_hint=effort_hint(backend),
         api_style=api_style,
         api_style_options=[ModelOption(**m) for m in API_STYLES],
+        compare_models=compare_models,
+        compare_source="dashboard" if db_compare_raw else "config",
+        compare_providers=compare_providers,
+        compare_max=MAX_COMPARE_MODELS,
     )
 
 
@@ -276,7 +333,14 @@ def set_global_settings(body: GlobalSettingsUpdate, request: Request) -> dict:
 @router.put("/api/settings/models")
 def set_models(body: ModelsUpdate, request: Request) -> dict:
     _require_admin(request)
-    from mira.dashboard.models_config import API_STYLE_VALUES, THINKING_MODE_VALUES
+    from mira.config import load_config
+    from mira.dashboard.model_catalog import active_backend
+    from mira.dashboard.models_config import (
+        API_STYLE_VALUES,
+        COMPARE_MODELS_KEY,
+        THINKING_MODE_VALUES,
+        validate_compare_entries,
+    )
 
     for field in ("review_thinking_mode", "indexing_thinking_mode", "security_thinking_mode"):
         value = getattr(body, field)
@@ -290,6 +354,15 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
             status_code=400,
             detail=f"{body.api_style!r} is not a valid API style.",
         )
+    # Comparison list: validate before persisting — a bad entry must fail
+    # the PUT, not the next PR review.
+    try:
+        compare_entries = validate_compare_entries(
+            [e.model_dump() for e in body.compare_models],
+            active_backend(load_config().llm),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     # "" clears the override so mira.yaml is authoritative again. Any other id
     # is stored as-is — the dashboard accepts the same free-form model ids as
     # mira.yaml (the dropdown still guides toward registry models), and the
@@ -310,6 +383,14 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
         _api._app_db.set_setting("api_style", body.api_style)
     else:
         _api._app_db.set_setting("api_style", "")
+
+    # Compare list: an empty list stores "" (inherit mira.yaml) — same
+    # convention as the flat keys; a non-empty list shadows the yaml one.
+    import json as _json
+
+    _api._app_db.set_setting(
+        COMPARE_MODELS_KEY, _json.dumps(compare_entries) if compare_entries else ""
+    )
 
     _api._app_db.mark_setup_complete()
     return {"ok": True}

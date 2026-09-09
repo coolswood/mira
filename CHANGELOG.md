@@ -4,6 +4,12 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0-compare1] — 2026-09-09
+
+### Added
+
+- **Parallel model comparison (shadow reviews).** Settings → Models gains a "Parallel review models" list (up to 3 entries; each pins a provider optionally — the CLI backends appear when their credentials are configured — plus model and effort). While a model is listed, every PR review runs it alongside the main review as a shadow pass: same triggers, same round/incremental-diff read path, but nothing is posted to the platform — no inline comments, no walkthrough, no thread resolution, no rule learning, no review-progress/SHA bookkeeping. The pass is recorded as a `kind='compare'` review event carrying the model id and the reviewed head SHA, and side passes (security/l10n/osv/secrets) don't re-run per compared model. Each review event now records which model produced it. A new per-PR compare view (Activity → Compare) groups passes into rounds by head SHA and computes finding overlap against the main pass (both found / only main / only this model) using the ensemble duplicate clustering. Org stats exclude compare rows. Progress cards show each shadow job separately. Deployment-level config: `llm.compare_models` in mira.yaml (dashboard list shadows it); per-repo overrides cannot set it.
+
 ## [0.9.0-chatter1] — 2026-09-09
 
 ### Added

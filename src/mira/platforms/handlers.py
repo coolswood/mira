@@ -4,6 +4,7 @@ none is tied to a specific platform's payload shape."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -247,10 +248,29 @@ async def run_pr_review(
     # shadowing it here would hand the engine an LLM provider instead.
     for llm_tier in (llm, indexing_llm, security_llm):
         llm_tier.progress_key = progress_key  # type: ignore[attr-defined]
+    # Parallel-model comparison: shadow reviews start alongside the main pass
+    # (same PR, same triggers) and never raise — failures are recorded
+    # per-model. Awaited after the outbound webhooks so REVIEW_COMPLETED
+    # reflects the main pass only.
+    from mira.core.compare import run_compare_reviews
+
+    compare_task = asyncio.create_task(
+        run_compare_reviews(
+            config, provider, owner, repo, number, pr_url, pr_title, bot_name, platform
+        )
+    )
+
     try:
         result = await engine.review_pr(pr_url)
         review_tracker.complete(repo_full, number)
     except Exception as exc:
+        # Keep the shadow reviews inside this task's lifecycle even when the
+        # main pass failed — their own failures are recorded per-model and
+        # never mask the original error.
+        try:
+            await compare_task
+        except Exception:
+            pass
         review_tracker.fail(repo_full, number, str(exc))
         _fail_progress(progress_key, exc)
         _record_review_failure(owner, repo, number, pr_url, pr_title, platform, exc)
@@ -282,6 +302,8 @@ async def run_pr_review(
     await dispatch_event(REVIEW_COMPLETED, event_data)
     if any(sev >= Severity.WARNING for sev in stats):
         await dispatch_event(REVIEW_HIGH_SEVERITY, event_data)
+
+    await compare_task
 
 
 async def run_pr_command(
@@ -375,15 +397,30 @@ async def run_pr_command(
         for llm_provider in (llm, indexing_llm, security_llm):
             llm_provider.progress_key = progress_key  # type: ignore[attr-defined]
         logger.info("Re-review triggered for %s by @%s", pr_url, actor)
+        # Same parallel-comparison treatment as automatic reviews; review-rest
+        # above deliberately skips it (continuation pass, not a comparison
+        # surface).
+        from mira.core.compare import run_compare_reviews
+
+        compare_task = asyncio.create_task(
+            run_compare_reviews(
+                config, provider, owner, repo, number, pr_url, pr_title, bot_name, platform
+            )
+        )
         try:
             await engine.review_pr(pr_url)
             review_tracker.complete(repo_full, number)
         except Exception as exc:
+            try:
+                await compare_task
+            except Exception:
+                pass
             review_tracker.fail(repo_full, number, str(exc))
             _fail_progress(progress_key, exc)
             _record_review_failure(owner, repo, number, pr_url, pr_title, platform, exc)
             raise
         _finish_progress(progress_key)
+        await compare_task
     else:
         pr_info = await provider.get_pr_info(pr_url)
         diff_text = await provider.get_pr_diff(pr_info)
