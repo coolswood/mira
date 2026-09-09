@@ -132,10 +132,11 @@ class TestAntigravityCLIProvider:
             LLMConfig(provider="antigravity-cli", antigravity_home=str(source))
         )
 
-        invocation_root = tmp_path / "invocation"
-        provider._prepare_gemini_home(str(invocation_root))
+        runtime_home = tmp_path / "runtime"
+        runtime_home.mkdir()
+        provider._prepare_gemini_home(str(runtime_home))
 
-        gemini = invocation_root / "gemini"
+        gemini = runtime_home / ".gemini"
         assert (gemini / "antigravity-cli" / "settings.json").read_text() == (
             '{"modelProvider": "gemini"}'
         )
@@ -148,18 +149,21 @@ class TestAntigravityCLIProvider:
             )
         )
 
+        runtime_home = tmp_path / "runtime"
+        runtime_home.mkdir()
         with pytest.raises(LLMError, match="home directory not found"):
-            provider._prepare_gemini_home(str(tmp_path / "invocation"))
+            provider._prepare_gemini_home(str(runtime_home))
 
     def test_api_key_auth_writes_gemini_provider_settings(self, tmp_path):
         provider = AntigravityCLIProvider(
             LLMConfig(provider="antigravity-cli", antigravity_api_key="key")
         )
 
-        invocation_root = tmp_path / "invocation"
-        provider._prepare_gemini_home(str(invocation_root))
+        runtime_home = tmp_path / "runtime"
+        runtime_home.mkdir()
+        provider._prepare_gemini_home(str(runtime_home))
 
-        settings = invocation_root / "gemini" / "antigravity-cli" / "settings.json"
+        settings = runtime_home / ".gemini" / "antigravity-cli" / "settings.json"
         assert json.loads(settings.read_text()) == {"modelProvider": "gemini"}
 
     def test_api_key_auth_does_not_override_copied_settings(self, tmp_path):
@@ -174,10 +178,11 @@ class TestAntigravityCLIProvider:
             )
         )
 
-        invocation_root = tmp_path / "invocation"
-        provider._prepare_gemini_home(str(invocation_root))
+        runtime_home = tmp_path / "runtime"
+        runtime_home.mkdir()
+        provider._prepare_gemini_home(str(runtime_home))
 
-        settings = invocation_root / "gemini" / "antigravity-cli" / "settings.json"
+        settings = runtime_home / ".gemini" / "antigravity-cli" / "settings.json"
         assert settings.read_text() == '{"modelProvider": "gemini"}'
 
     def test_no_auth_configured_leaves_home_empty(
@@ -186,10 +191,11 @@ class TestAntigravityCLIProvider:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         provider = AntigravityCLIProvider(LLMConfig(provider="antigravity-cli"))
 
-        invocation_root = tmp_path / "invocation"
-        provider._prepare_gemini_home(str(invocation_root))
+        runtime_home = tmp_path / "runtime"
+        runtime_home.mkdir()
+        provider._prepare_gemini_home(str(runtime_home))
 
-        assert list((invocation_root / "gemini").iterdir()) == []
+        assert list((runtime_home / ".gemini").iterdir()) == []
 
     def test_extracts_fenced_json(self):
         provider = AntigravityCLIProvider(LLMConfig(provider="antigravity-cli"))
