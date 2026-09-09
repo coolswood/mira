@@ -28,6 +28,9 @@ class TestActiveBackend:
     def test_codex_cli_provider(self):
         assert active_backend(LLMConfig(provider="codex-cli")) == "codex-cli"
 
+    def test_antigravity_cli_provider(self):
+        assert active_backend(LLMConfig(provider="antigravity-cli")) == "antigravity-cli"
+
     def test_generic_endpoint(self):
         assert (
             active_backend(LLMConfig(base_url="http://localhost:11434/v1")) == "openai-compatible"
@@ -47,9 +50,14 @@ class TestBuildOptions:
         values = [m["value"] for m in build_options("codex-cli", None, "review")]
         assert values == ["codex-default"]
 
+    def test_antigravity_backend_only_offers_antigravity_models(self):
+        values = [m["value"] for m in build_options("antigravity-cli", None, "review")]
+        assert values == ["antigravity-default"]
+
     def test_openrouter_does_not_offer_codex_models(self):
         values = [m["value"] for m in build_options("openrouter", None, "review")]
         assert "codex-default" not in values
+        assert "antigravity-default" not in values
 
     def test_dynamic_merged_and_deduped_against_registry(self):
         dynamic = [
