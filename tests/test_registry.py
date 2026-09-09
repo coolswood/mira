@@ -37,17 +37,25 @@ class TestCurrentGenerationModels:
             assert model_id in [m["value"] for m in registry.models_for_purpose(purpose)]
 
     def test_recommended_defaults_unchanged(self):
-        # Recommended stays on the eval-validated pair until benchmarks say
-        # otherwise (v10 baseline was measured on Sonnet 4.6 / Haiku 4.5).
+        # HTTP backends: recommended stays on the eval-validated pair until
+        # benchmarks say otherwise (v10 baseline was measured on Sonnet 4.6 /
+        # Haiku 4.5). CLI backends recommend their CLI default instead — the
+        # eval pair isn't servable there (provider-filtered dropdowns) — plus
+        # one cheap explicit pick per purpose.
         indexing = registry.models_for_purpose("indexing")
         review = registry.models_for_purpose("review")
         assert [m["value"] for m in indexing if m["recommended"]] == [
+            "antigravity-default",
             "anthropic/claude-haiku-4-5",
             "us.anthropic.claude-haiku-4-5-v1:0",
+            "gemini-3.8-flash-low",
+            "gpt-5.1-codex-mini",
         ]
         assert [m["value"] for m in review if m["recommended"]] == [
+            "antigravity-default",
             "anthropic/claude-sonnet-4-6",
             "us.anthropic.claude-sonnet-4-6-v1:0",
+            "gpt-5.1-codex",
         ]
 
     def test_superseded_models_removed(self):
