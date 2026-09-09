@@ -62,7 +62,7 @@ class TestInstallationWebhook:
             )
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "processing"
+        assert resp.json()["status"] == "accepted"
         mock_handler.assert_called_once()
 
     async def test_installation_deleted_processed(self, client):
@@ -82,7 +82,7 @@ class TestInstallationWebhook:
         )
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "processing"
+        assert resp.json()["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -108,7 +108,7 @@ class TestReposAddedWebhook:
             )
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "processing"
+        assert resp.json()["status"] == "accepted"
         mock_handler.assert_called_once()
 
 
@@ -140,7 +140,7 @@ class TestPushWebhook:
             )
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "processing"
+        assert resp.json()["status"] == "accepted"
         mock_handler.assert_called_once()
 
     async def test_push_to_feature_branch_ignored(self, client):
@@ -166,4 +166,4 @@ class TestPushWebhook:
         )
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ignored"
+        assert resp.json()["status"] == "accepted"
