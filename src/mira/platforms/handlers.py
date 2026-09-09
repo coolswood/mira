@@ -159,8 +159,10 @@ async def run_pr_review(
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
     security_llm = create_llm(llm_config_for("security", config.llm))
-    for provider in (llm, indexing_llm, security_llm):
-        provider.progress_key = progress_key  # type: ignore[attr-defined]
+    # Not `provider` — that name is the platform provider parameter, and
+    # shadowing it here would hand the engine an LLM provider instead.
+    for llm_tier in (llm, indexing_llm, security_llm):
+        llm_tier.progress_key = progress_key  # type: ignore[attr-defined]
     engine = ReviewEngine(
         config=config,
         llm=llm,
