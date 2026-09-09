@@ -24,6 +24,18 @@ import { api } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { useDocumentTitle } from "@/lib/hooks"
 
+// Backend id → display name for the header badge.
+const BACKEND_LABELS: Record<string, string> = {
+  "antigravity-cli": "Antigravity CLI · Gemini",
+  "codex-cli": "Codex CLI · ChatGPT",
+  openrouter: "OpenRouter",
+  bedrock: "AWS Bedrock",
+  "openai-compatible": "OpenAI-compatible endpoint",
+}
+// Backends that shell out to a CLI per call — the OpenAI protocol selector
+// doesn't apply to them.
+const CLI_BACKENDS = new Set(["codex-cli", "antigravity-cli"])
+
 export function SettingsPage() {
   useDocumentTitle("Settings")
   const { user: currentUser } = useAuth()
@@ -36,12 +48,18 @@ export function SettingsPage() {
   const [configIndexingModel, setConfigIndexingModel] = useState("")
   const [configReviewModel, setConfigReviewModel] = useState("")
   const [configSecurityModel, setConfigSecurityModel] = useState("")
+  const [indexingSource, setIndexingSource] = useState<"dashboard" | "config">("config")
+  const [reviewSource, setReviewSource] = useState<"dashboard" | "config">("config")
+  const [securitySource, setSecuritySource] = useState<"dashboard" | "config">("config")
   const [backend, setBackend] = useState("")
   const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
   const [securityOptions, setSecurityOptions] = useState<ModelOption[]>([])
+  const [indexingThinking, setIndexingThinking] = useState("off")
   const [thinkingMode, setThinkingMode] = useState("off")
+  const [securityThinking, setSecurityThinking] = useState("off")
   const [thinkingOptions, setThinkingOptions] = useState<ModelOption[]>([])
+  const [effortHint, setEffortHint] = useState("")
   const [apiStyle, setApiStyle] = useState("chat")
   const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
@@ -76,12 +94,18 @@ export function SettingsPage() {
       setConfigIndexingModel(m.config_indexing_model)
       setConfigReviewModel(m.config_review_model)
       setConfigSecurityModel(m.config_security_model)
+      setIndexingSource(m.indexing_source)
+      setReviewSource(m.review_source)
+      setSecuritySource(m.security_source)
       setBackend(m.backend)
       setIndexingOptions(m.indexing_options)
       setReviewOptions(m.review_options)
       setSecurityOptions(m.security_options)
+      setIndexingThinking(m.indexing_thinking_mode)
       setThinkingMode(m.review_thinking_mode)
+      setSecurityThinking(m.security_thinking_mode)
       setThinkingOptions(m.thinking_options)
+      setEffortHint(m.effort_hint)
       setApiStyle(m.api_style ?? "chat")
       setApiStyleOptions(m.api_style_options ?? [])
     })
@@ -109,17 +133,88 @@ export function SettingsPage() {
 
   const saveModels = async () => {
     setSavingModels(true)
-    await api.saveModels(
-      indexingModel,
-      reviewModel,
-      securityModel,
-      thinkingMode,
-      apiStyle
-    )
+    await api.saveModels({
+      indexing_model: indexingModel,
+      review_model: reviewModel,
+      security_model: securityModel,
+      indexing_thinking_mode: indexingThinking,
+      review_thinking_mode: thinkingMode,
+      security_thinking_mode: securityThinking,
+      api_style: apiStyle,
+    })
     setSavingModels(false)
     setModelsSaved(true)
     setTimeout(() => setModelsSaved(false), 2000)
   }
+
+  // One review-tier block: purpose description + model picker (wide) and
+  // reasoning-effort selector (narrow) side by side, so the effort reads as
+  // a property of the chosen model.
+  const modelTaskField = ({
+    title,
+    description,
+    model,
+    setModel,
+    options,
+    configModel,
+    source,
+    effort,
+    setEffort,
+  }: {
+    title: string
+    description: string
+    model: string
+    setModel: (v: string) => void
+    options: ModelOption[]
+    configModel: string
+    source: "dashboard" | "config"
+    effort: string
+    setEffort: (v: string) => void
+  }) => (
+    <div className="space-y-3 rounded-lg border p-4">
+      <div className="space-y-1">
+        <div className="flex items-baseline gap-3">
+          <label className="text-sm font-medium">{title}</label>
+          {source === "dashboard" && (
+            <span className="text-[11px] font-semibold text-primary">
+              Overrides <code className="font-mono">mira.yaml</code>
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_11rem]">
+        <div className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">
+            Model
+          </span>
+          <ModelCombobox
+            value={model}
+            onChange={setModel}
+            options={options}
+            configModel={configModel}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <span className="text-xs font-medium text-muted-foreground">
+            Reasoning effort
+          </span>
+          <Select value={effort} onValueChange={setEffort}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {thinkingOptions.map((opt) => (
+                <SelectItem key={opt.value} value={opt.value}>
+                  {opt.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+    </div>
+  )
 
   const setOverride = (
     section: "filter" | "review",
@@ -332,82 +427,63 @@ export function SettingsPage() {
       {section === "models" && (
         <Card>
           <CardHeader>
-            <CardTitle>Models</CardTitle>
-            <CardDescription>
-              Choose models for indexing and PR reviews
-              {backend &&
-                ` — listed from ${
-                  { openrouter: "OpenRouter", bedrock: "AWS Bedrock" }[
-                    backend
-                  ] ?? "your configured endpoint"
-                }`}
-            </CardDescription>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1">
+                <CardTitle>Models</CardTitle>
+                <CardDescription>
+                  Choose which model handles each job — or leave it on Inherit
+                  to use the deployment default. Type any model id your backend
+                  accepts if it isn't listed.
+                </CardDescription>
+              </div>
+              {backend && (
+                <span className="rounded-full border px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+                  {BACKEND_LABELS[backend] ?? backend}
+                </span>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Indexing Model</label>
-              <ModelCombobox
-                value={indexingModel}
-                onChange={setIndexingModel}
-                options={indexingOptions}
-                configModel={configIndexingModel}
-              />
-              <p className="text-xs text-muted-foreground">
-                Used to summarize files when building the code index. A cheaper
-                model is recommended since it runs over every file.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Review Model</label>
-              <ModelCombobox
-                value={reviewModel}
-                onChange={setReviewModel}
-                options={reviewOptions}
-                configModel={configReviewModel}
-              />
-              <p className="text-xs text-muted-foreground">
-                Used to analyze PRs and post review comments. A more powerful
-                model gives better review quality.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Security Model</label>
-              <ModelCombobox
-                value={securityModel}
-                onChange={setSecurityModel}
-                options={securityOptions}
-                configModel={configSecurityModel}
-              />
-              <p className="text-xs text-muted-foreground">
-                Used for the dedicated security pass. Defaults to the review
-                model — set a cheaper one only if you accept lower security
-                recall.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">
-                Review Thinking Mode
-              </label>
-              <Select value={thinkingMode} onValueChange={setThinkingMode}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {thinkingOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                Extended reasoning budget for reviews — improves depth on
-                capable models at the cost of latency and tokens. Works on
-                OpenRouter and Bedrock (Claude); on other endpoints it's skipped
-                automatically when unsupported.
-              </p>
-            </div>
-            {backend !== "bedrock" && (
+            {modelTaskField({
+              title: "Indexing",
+              description:
+                "Summarizes files while building the code index. A cheaper, faster model is recommended — it runs over every file.",
+              model: indexingModel,
+              setModel: setIndexingModel,
+              options: indexingOptions,
+              configModel: configIndexingModel,
+              source: indexingSource,
+              effort: indexingThinking,
+              setEffort: setIndexingThinking,
+            })}
+            {modelTaskField({
+              title: "Review",
+              description:
+                "Analyzes PRs and posts inline review comments. A stronger model or higher effort gives deeper findings, at the cost of latency and tokens.",
+              model: reviewModel,
+              setModel: setReviewModel,
+              options: reviewOptions,
+              configModel: configReviewModel,
+              source: reviewSource,
+              effort: thinkingMode,
+              setEffort: setThinkingMode,
+            })}
+            {modelTaskField({
+              title: "Security",
+              description:
+                "Dedicated security pass (XSS, injection, auth, CSRF, SSRF). Follows the review model by default — downgrade only if you accept lower security recall.",
+              model: securityModel,
+              setModel: setSecurityModel,
+              options: securityOptions,
+              configModel: configSecurityModel,
+              source: securitySource,
+              effort: securityThinking,
+              setEffort: setSecurityThinking,
+            })}
+            {effortHint && (
+              <p className="text-xs text-muted-foreground">{effortHint}</p>
+            )}
+            {!CLI_BACKENDS.has(backend) && backend !== "" && (
               <div className="space-y-2">
                 <label className="text-sm font-medium">API Protocol</label>
                 <Select value={apiStyle} onValueChange={setApiStyle}>

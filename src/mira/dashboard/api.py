@@ -416,9 +416,15 @@ class ModelsResponse(BaseModel):
     indexing_options: list[ModelOption]
     review_options: list[ModelOption]
     security_options: list[ModelOption]
-    # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max").
+    # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max"),
+    # plus the per-task selectors for indexing/security.
     review_thinking_mode: str
+    indexing_thinking_mode: str
+    security_thinking_mode: str
+    # Effort levels filtered to what the active backend honors, and a one-line
+    # explanation of how the level reaches it.
     thinking_options: list[ModelOption]
+    effort_hint: str
     # Protocol dialect for the OpenAI-compatible endpoint ("chat"/"responses"),
     # resolved DB → config → default. Mirrors review_thinking_mode.
     api_style: str
@@ -430,6 +436,8 @@ class ModelsUpdate(BaseModel):
     review_model: str
     security_model: str = ""
     review_thinking_mode: str = "off"
+    indexing_thinking_mode: str = "off"
+    security_thinking_mode: str = "off"
     api_style: str = "chat"
 
 

@@ -289,7 +289,10 @@ class ProgressTracker:
             if not job:
                 return
             if ok:
-                job.chunks_done = max(job.chunks_done, index)
+                # Count completions, not the max finished index: chunks run
+                # concurrently and finish out of order, so max() would jump
+                # the counter to 100% while earlier chunks are still in flight.
+                job.chunks_done += 1
             message = f"chunk {index}/{job.chunks_total} finished"
             if not ok:
                 message += " (failed)"

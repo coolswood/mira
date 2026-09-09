@@ -1,5 +1,5 @@
 {
-  "_comment": "Mira's model registry — labels, pricing, and per-purpose recommendations for the dashboard and cost estimates. Selection is not limited to this list: the dashboard merges the backend's live catalog and accepts free-form ids. Format mirrors a trimmed subset of LiteLLM's model_prices_and_context_window.json so users familiar with that file recognize the shape.",
+  "_comment": "Mira's model registry — labels, pricing, and per-purpose recommendations for the dashboard and cost estimates. Selection is not limited to this list: the dashboard merges the backend's live catalog and accepts free-form ids. Format mirrors a trimmed subset of LiteLLM's model_prices_and_context_window.json so users familiar with that file recognize the shape. CLI backends have no HTTP catalog: the antigravity-cli entries below are the offline fallback for its live `agy models` fetch, and the codex-cli entries are the only source for that backend.",
   "_fields": {
     "label": "Display name shown in the dashboard dropdown.",
     "provider": "Underlying provider (anthropic, openai, google, etc.) — purely informational.",
@@ -199,6 +199,28 @@
     "purposes": ["indexing", "review"],
     "recommended_for": []
   },
+  "gpt-5.1-codex": {
+    "label": "GPT-5.1 Codex",
+    "provider": "codex-cli",
+    "max_input_tokens": 400000,
+    "max_output_tokens": 128000,
+    "input_cost_per_1m": 0.00,
+    "output_cost_per_1m": 0.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": ["review"]
+  },
+  "gpt-5.1-codex-mini": {
+    "label": "GPT-5.1 Codex Mini",
+    "provider": "codex-cli",
+    "max_input_tokens": 400000,
+    "max_output_tokens": 100000,
+    "input_cost_per_1m": 0.00,
+    "output_cost_per_1m": 0.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": ["indexing"]
+  },
   "antigravity-default": {
     "label": "Antigravity CLI default",
     "provider": "antigravity-cli",
@@ -208,7 +230,51 @@
     "output_cost_per_1m": 0.00,
     "supports_json_mode": true,
     "purposes": ["indexing", "review"],
+    "recommended_for": ["indexing", "review"]
+  },
+  "gemini-3.1-pro-high": {
+    "label": "Gemini 3.1 Pro (High)",
+    "provider": "antigravity-cli",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 65536,
+    "input_cost_per_1m": 0.00,
+    "output_cost_per_1m": 0.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
     "recommended_for": []
+  },
+  "gemini-3.8-flash-high": {
+    "label": "Gemini 3.8 Flash (High)",
+    "provider": "antigravity-cli",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 65535,
+    "input_cost_per_1m": 0.00,
+    "output_cost_per_1m": 0.00,
+    "supports_json_mode": true,
+    "purposes": ["review"],
+    "recommended_for": []
+  },
+  "gemini-3.8-flash-medium": {
+    "label": "Gemini 3.8 Flash (Medium)",
+    "provider": "antigravity-cli",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 65535,
+    "input_cost_per_1m": 0.00,
+    "output_cost_per_1m": 0.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": []
+  },
+  "gemini-3.8-flash-low": {
+    "label": "Gemini 3.8 Flash (Low)",
+    "provider": "antigravity-cli",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 65535,
+    "input_cost_per_1m": 0.00,
+    "output_cost_per_1m": 0.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing"],
+    "recommended_for": ["indexing"]
   },
   "us.anthropic.claude-sonnet-4-6-v1:0": {
     "label": "Claude Sonnet 4.6 (Bedrock)",

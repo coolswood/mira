@@ -10,7 +10,7 @@ import pytest
 from mira.config import LLMConfig
 from mira.exceptions import LLMError
 from mira.llm import create_llm
-from mira.llm.codex_cli import CodexCLIProvider
+from mira.llm.codex_cli import _STREAM_LIMIT, CodexCLIProvider
 
 
 class TestCodexCLIProvider:
@@ -195,11 +195,49 @@ class TestCodexCLIProvider:
         assert await_args is not None
         assert await_args.kwargs["start_new_session"] is True
 
+    @pytest.mark.asyncio
+    async def test_agent_message_larger_than_default_stream_limit_is_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The terminal item.completed event carries the whole review on one
+        # JSONL line; with asyncio's default 64 KiB stream-reader limit that
+        # line raises ValueError and aborts a valid call. The subprocess must
+        # be spawned with a raised limit, and the reader must digest events
+        # larger than the default.
+        big_response = "x" * (70 * 1024)
+        events = [
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": big_response},
+            },
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+        ]
+        spawn = AsyncMock(
+            return_value=self._fake_codex_proc(events, stream_limit=_STREAM_LIMIT)
+        )
+        monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli"))
+
+        text, usage = await provider._run_codex("prompt")
+
+        assert text == big_response
+        assert usage["output_tokens"] == 5
+        await_args = spawn.await_args
+        assert await_args is not None
+        assert await_args.kwargs["limit"] == _STREAM_LIMIT
+
     # ── exec --json event stream ───────────────────────────────────
 
     @staticmethod
-    def _reader(lines: list[bytes]) -> asyncio.StreamReader:
-        reader = asyncio.StreamReader()
+    def _reader(lines: list[bytes], stream_limit: int | None = None) -> asyncio.StreamReader:
+        # Default-constructed readers mirror asyncio's 64 KiB stream limit;
+        # stream_limit mirrors the raised limit the provider passes to
+        # create_subprocess_exec.
+        reader = (
+            asyncio.StreamReader(limit=stream_limit)
+            if stream_limit is not None
+            else asyncio.StreamReader()
+        )
         for line in lines:
             reader.feed_data(line)
         reader.feed_eof()
@@ -210,13 +248,20 @@ class TestCodexCLIProvider:
         events: list[dict],
         last_message: str = "",
         exit_code: int = 0,
+        stream_limit: int | None = None,
     ) -> MagicMock:
         """A fake codex exec process whose stdout carries a --json stream."""
         import json as _json
 
         proc = MagicMock()
+        # Beyond PID_MAX_LIMIT (2**22): unallocatable, so an accidental
+        # os.killpg(proc.pid) from _terminate_process_tree raises
+        # ProcessLookupError instead of signalling a live group. A bare
+        # MagicMock pid would __index__ to 0 and kill the caller's own
+        # process group.
+        proc.pid = 12345678
         proc.stdout = TestCodexCLIProvider._reader(
-            [_json.dumps(e).encode() + b"\n" for e in events]
+            [_json.dumps(e).encode() + b"\n" for e in events], stream_limit=stream_limit
         )
         stderr = asyncio.StreamReader()
         stderr.feed_eof()
@@ -416,3 +461,33 @@ class TestCodexCLIProvider:
 
         assert msg == {"content": "", "tool_calls": []}
         provider._run_codex.assert_not_awaited()
+
+
+class TestCodexCommandEffort:
+    def test_effort_passed_as_config_override(self):
+        from mira.llm.codex_cli import CodexCLIProvider
+
+        provider = CodexCLIProvider(
+            LLMConfig(provider="codex-cli", reasoning_effort="medium")
+        )
+        cmd = provider._command("/tmp/out.txt")
+        assert "-c" in cmd
+        assert cmd[cmd.index("-c", cmd.index("-c") + 1) + 1] == "model_reasoning_effort=medium"
+
+    @pytest.mark.parametrize("effort", ["xhigh", "max"])
+    def test_stronger_efforts_clamp_to_high(self, effort: str):
+        from mira.llm.codex_cli import CodexCLIProvider
+
+        provider = CodexCLIProvider(LLMConfig(provider="codex-cli", reasoning_effort=effort))
+        cmd = provider._command("/tmp/out.txt")
+        assert "model_reasoning_effort=high" in cmd
+
+    def test_no_effort_flag_when_unset_or_off(self):
+        from mira.llm.codex_cli import CodexCLIProvider
+
+        for effort in (None, "off"):
+            provider = CodexCLIProvider(
+                LLMConfig(provider="codex-cli", reasoning_effort=effort)
+            )
+            cmd = provider._command("/tmp/out.txt")
+            assert not any(str(part).startswith("model_reasoning_effort") for part in cmd)

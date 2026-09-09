@@ -26,6 +26,16 @@ from mira.exceptions import LLMError
 
 logger = logging.getLogger(__name__)
 
+# Mira reasoning efforts understood by Codex's model_reasoning_effort config;
+# stronger levels clamp to "high" (the widest codex-wide value).
+_EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
+
+# One exec --json line can embed an entire model response (``item.completed``
+# with an agent_message), which can exceed asyncio's default 64 KiB
+# stream-reader limit and abort a valid review — open the subprocess pipes
+# with headroom.
+_STREAM_LIMIT = 10 * 1024 * 1024
+
 
 def _parse_exec_event(raw: bytes | str) -> dict | None:
     """Parse one ``codex exec --json`` JSONL line into an event dict.
@@ -139,6 +149,13 @@ class CodexCLIProvider:
         ]
         if self.config.model not in {"", "default", "codex-default"}:
             cmd.extend(["-m", self.config.model])
+        effort = _EFFORT_MAP.get(self.config.reasoning_effort or "")
+        if effort:
+            # Codex reads its reasoning level from config, not a flag; a `-c`
+            # override lands in the ephemeral CODEX_HOME the CLI consults.
+            # Stronger levels clamp to "high" (the widest codex-wide value —
+            # "xhigh" exists only on codex-max model variants).
+            cmd.extend(["-c", f"model_reasoning_effort={effort}"])
         cmd.append("-")
         return cmd
 
@@ -190,6 +207,7 @@ class CodexCLIProvider:
                     env=self._env(runtime_home, runtime_codex_home),
                     cwd=runtime_home,
                     start_new_session=os.name == "posix",
+                    limit=_STREAM_LIMIT,
                 )
             except FileNotFoundError as exc:
                 raise LLMError(

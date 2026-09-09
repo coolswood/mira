@@ -34,6 +34,44 @@ THINKING_MODES: list[dict[str, str]] = [
 ]
 THINKING_MODE_VALUES = {m["value"] for m in THINKING_MODES}
 
+# Reasoning-effort levels each backend actually honors; the dashboard dropdown
+# is filtered to this set and _BACKEND_EFFORT_HINTS explains the mapping.
+# Levels outside a backend's set are either clamped by the provider
+# (antigravity: xhigh/max → high) or unsupported (bedrock has no "xhigh";
+# OpenRouter rejects "max" — the provider profile remaps it to "xhigh").
+_BACKEND_EFFORT_LEVELS: dict[str, list[str]] = {
+    "antigravity-cli": ["off", "low", "medium", "high"],
+    "codex-cli": ["off", "low", "medium", "high"],
+    "bedrock": ["off", "low", "medium", "high", "max"],
+    "openrouter": ["off", "low", "medium", "high", "xhigh", "max"],
+    "openai-compatible": ["off", "low", "medium", "high", "xhigh", "max"],
+}
+
+_BACKEND_EFFORT_HINTS: dict[str, str] = {
+    "antigravity-cli": (
+        "Sent to agy as --effort when the CLI picks the model (\"Inherit\"). "
+        "Named models carry their effort in the id — gemini-*-high/-medium/-low, "
+        "Claude (Thinking) — so choose the level by picking the model."
+    ),
+    "codex-cli": "Sent to Codex as model_reasoning_effort; xhigh/max are sent as high.",
+    "bedrock": "Maps to Claude thinking budget tokens (low 2K, medium 8K, high 16K, max 32K).",
+    "openrouter": "Sent as reasoning.effort; \"max\" is remapped to \"xhigh\" (OpenRouter rejects \"max\").",
+    "openai-compatible": (
+        "Sent as reasoning.effort; honored when the endpoint's model supports reasoning."
+    ),
+}
+
+
+def thinking_modes_for_backend(backend: str) -> list[dict[str, str]]:
+    """THINKING_MODES filtered to the levels the backend honors."""
+    allowed = set(_BACKEND_EFFORT_LEVELS.get(backend, sorted(THINKING_MODE_VALUES)))
+    return [m for m in THINKING_MODES if m["value"] in allowed]
+
+
+def effort_hint(backend: str) -> str:
+    """One-line explanation of how the effort level reaches the backend."""
+    return _BACKEND_EFFORT_HINTS.get(backend, _BACKEND_EFFORT_HINTS["openai-compatible"])
+
 # API-protocol options for the Models page. Single source for the dropdown
 # and validation, mirroring THINKING_MODES.
 API_STYLES: list[dict[str, str]] = [
@@ -138,6 +176,43 @@ def get_review_thinking_mode(config: LLMConfig, db_value: str | None = None) -> 
     return resolved
 
 
+def get_indexing_thinking_mode(config: LLMConfig, db_value: str | None = None) -> str | None:
+    """Resolve the indexing thinking mode: DB → config.indexing_reasoning_effort → None.
+
+    Indexing defaults to no reasoning (it's the highest-volume, lowest-stakes
+    pass) — an effort only applies when set explicitly here or in mira.yaml.
+    """
+    resolved = db_value if (db_value and db_value != "off") else config.indexing_reasoning_effort
+    if not resolved or resolved == "off":
+        return None
+    return resolved
+
+
+def get_security_thinking_mode(
+    config: LLMConfig,
+    db_value: str | None = None,
+    db_review_value: str | None = None,
+) -> str | None:
+    """Resolve the security-pass thinking mode.
+
+    Chain: security's own DB setting → the review DB setting (the historical
+    shared behavior — before per-task selectors existed, security simply
+    followed the review mode) → config.security_reasoning_effort →
+    config.review_reasoning_effort → None. "off" normalizes to None at every
+    step, exactly like :func:`get_review_thinking_mode`.
+    """
+    resolved = db_value if (db_value and db_value != "off") else None
+    if resolved is None:
+        resolved = db_review_value if (db_review_value and db_review_value != "off") else None
+    if resolved is None:
+        resolved = config.security_reasoning_effort
+    if resolved is None:
+        resolved = config.review_reasoning_effort
+    if not resolved or resolved == "off":
+        return None
+    return resolved
+
+
 def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     """Return an LLMConfig with the appropriate model set for the given purpose.
 
@@ -147,6 +222,7 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     """
     db_model: str | None = None
     db_thinking: str | None = None
+    db_review_thinking: str | None = None
     db_review: str | None = None
     db_style: str | None = None
     try:
@@ -155,27 +231,30 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
         if _app_db is not None:
             if purpose == "indexing":
                 db_model = _app_db.get_setting("indexing_model")
+                db_thinking = _app_db.get_setting("indexing_thinking_mode")
             elif purpose == "review":
                 db_model = _app_db.get_setting("review_model")
                 db_thinking = _app_db.get_setting("review_thinking_mode")
             elif purpose == "security":
                 db_model = _app_db.get_setting("security_model")
-                db_thinking = _app_db.get_setting("review_thinking_mode")
+                db_thinking = _app_db.get_setting("security_thinking_mode")
+                # The security effort falls back to the review setting when
+                # its own is unset — the historical shared behavior.
+                db_review_thinking = _app_db.get_setting("review_thinking_mode")
                 db_review = _app_db.get_setting("review_model")
             db_style = _app_db.get_setting("api_style")
     except Exception:
         pass  # DB not available — resolve from config fields alone
 
-    # Thinking mode only applies to reviews; other purposes leave it off.
-    thinking_mode: str | None = None
     resolved_style = resolve_api_style(base, db_style)
     if purpose == "indexing":
         resolved = get_indexing_model(base, db_model)
         config_model = base.indexing_model
+        thinking_mode = get_indexing_thinking_mode(base, db_thinking)
     elif purpose == "security":
         resolved = get_security_model(base, db_model, db_review)
         config_model = base.security_model or base.review_model
-        thinking_mode = get_review_thinking_mode(base, db_thinking)
+        thinking_mode = get_security_thinking_mode(base, db_thinking, db_review_thinking)
     elif purpose == "review":
         resolved = get_review_model(base, db_model)
         config_model = base.review_model

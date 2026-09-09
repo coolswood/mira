@@ -11,7 +11,7 @@ import pytest
 from mira.config import LLMConfig
 from mira.exceptions import LLMError
 from mira.llm import create_llm
-from mira.llm.antigravity_cli import _STREAM_LIMIT, AntigravityCLIProvider
+from mira.llm.antigravity_cli import _STREAM_LIMIT, AntigravityCLIProvider, list_models
 
 
 class TestAntigravityCLIProvider:
@@ -41,7 +41,11 @@ class TestAntigravityCLIProvider:
             "900s",
         ]
 
-    def test_command_passes_model_and_effort(self):
+    def test_command_with_explicit_model_omits_effort(self):
+        # agy hard-errors when --model is combined with --effort: named models
+        # carry their reasoning level in the id (gemini-*-high/-medium/-low,
+        # "(Thinking)" builds). A stored effort must not break explicit-model
+        # calls, so the flag is skipped entirely.
         provider = AntigravityCLIProvider(
             LLMConfig(
                 provider="antigravity-cli",
@@ -53,10 +57,18 @@ class TestAntigravityCLIProvider:
         cmd = provider._command()
         assert "--model" in cmd
         assert cmd[cmd.index("--model") + 1] == "gemini-3-pro"
-        # Stronger efforts clamp to the CLI maximum.
-        assert cmd[cmd.index("--effort") + 1] == "high"
+        assert "--effort" not in cmd
         assert "--sandbox" in cmd
         assert "--print-timeout" in cmd
+
+    def test_command_effort_applies_to_default_model(self):
+        provider = AntigravityCLIProvider(
+            LLMConfig(provider="antigravity-cli", model="antigravity-default", reasoning_effort="max")
+        )
+        cmd = provider._command()
+        assert "--model" not in cmd
+        # Stronger efforts clamp to the CLI maximum.
+        assert cmd[cmd.index("--effort") + 1] == "high"
 
     @pytest.mark.parametrize("sentinel", ["", "default", "antigravity-default", "agy-default"])
     def test_command_omits_model_and_effort_for_defaults(self, sentinel: str):
@@ -677,3 +689,82 @@ class TestAntigravityCLIProvider:
 
         assert msg == {"content": "", "tool_calls": []}
         provider._run_antigravity.assert_not_awaited()
+
+
+class TestListModels:
+    """`list_models` feeds the dashboard's live model catalog for agy."""
+
+    @staticmethod
+    def _fake_run(monkeypatch: pytest.MonkeyPatch, stdout: str, returncode: int = 0):
+        import subprocess
+
+        calls: dict = {}
+
+        def fake_run(cmd, env, cwd, capture_output, text, timeout):
+            calls["cmd"] = cmd
+            calls["env"] = env
+            calls["cwd"] = cwd
+            return subprocess.CompletedProcess(
+                cmd, returncode, stdout=stdout, stderr="sign-in required"
+            )
+
+        monkeypatch.setattr("mira.llm.antigravity_cli.subprocess.run", fake_run)
+        return calls
+
+    def test_parses_tab_separated_rows_and_skips_banner(self, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        calls = self._fake_run(
+            monkeypatch,
+            stdout=(
+                "Fetching available models...\n"
+                "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n"
+                "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
+                "Please sign in to view available models.\n"
+            ),
+        )
+        out = list_models(LLMConfig(provider="antigravity-cli"))
+        assert out == [
+            {"value": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (Low)"},
+            {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (Thinking)"},
+        ]
+        assert calls["cmd"] == ["agy", "models"]
+        # The run happens in an ephemeral HOME, like a real review call.
+        assert calls["env"]["HOME"] == calls["cwd"]
+        assert calls["env"]["HOME"].startswith("/tmp/mira-antigravity-catalog-")
+
+    def test_auth_failure_raises_llm_error(self, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        self._fake_run(monkeypatch, stdout="Please sign in.\n", returncode=1)
+        with pytest.raises(LLMError, match="model listing failed"):
+            list_models(LLMConfig(provider="antigravity-cli"))
+
+    def test_no_parseable_rows_raises(self, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        self._fake_run(monkeypatch, stdout="Fetching available models...\n")
+        with pytest.raises(LLMError, match="returned no models"):
+            list_models(LLMConfig(provider="antigravity-cli"))
+
+    def test_copies_antigravity_home_into_ephemeral_home(self, monkeypatch, tmp_path):
+        import subprocess
+
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        source = tmp_path / "gemini-state"
+        (source / "antigravity-cli").mkdir(parents=True)
+        (source / "antigravity-cli" / "antigravity-oauth-token").write_text("tok")
+        seen: dict = {}
+
+        def fake_run(cmd, env, cwd, capture_output, text, timeout):
+            # Capture while the ephemeral HOME still exists.
+            token = Path(env["HOME"]) / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+            seen["token"] = token.read_text()
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n", stderr=""
+            )
+
+        monkeypatch.setattr("mira.llm.antigravity_cli.subprocess.run", fake_run)
+        out = list_models(
+            LLMConfig(provider="antigravity-cli", antigravity_home=str(source))
+        )
+        assert out == [{"value": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (Low)"}]
+        # The trusted login state lands in the ephemeral HOME's .gemini.
+        assert seen["token"] == "tok"
