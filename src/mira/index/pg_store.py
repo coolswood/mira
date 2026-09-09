@@ -113,6 +113,9 @@ CREATE TABLE IF NOT EXISTS review_events (
     author TEXT NOT NULL DEFAULT '',
     author_avatar_url TEXT NOT NULL DEFAULT '',
     reviewed_paths TEXT NOT NULL DEFAULT '',
+    -- Mirrors IndexStore.review_events: 'completed' | 'failed' + safe summary.
+    status TEXT NOT NULL DEFAULT 'completed',
+    error TEXT NOT NULL DEFAULT '',
     created_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
 
@@ -274,11 +277,16 @@ def _get_conn(url: str) -> Any:
                 cur.execute(
                     "ALTER TABLE files ADD COLUMN IF NOT EXISTS loc INTEGER NOT NULL DEFAULT 0"
                 )
-                for col in ("author", "author_avatar_url", "reviewed_paths"):
+                for col in ("author", "author_avatar_url", "reviewed_paths", "error"):
                     cur.execute(
                         f"ALTER TABLE review_events ADD COLUMN IF NOT EXISTS {col} "
                         "TEXT NOT NULL DEFAULT ''"
                     )
+                # Existing rows are completed passes, hence the 'completed' default.
+                cur.execute(
+                    "ALTER TABLE review_events ADD COLUMN IF NOT EXISTS status "
+                    "TEXT NOT NULL DEFAULT 'completed'"
+                )
                 cur.execute(
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS status "
                     "TEXT NOT NULL DEFAULT 'approved'"
@@ -846,6 +854,59 @@ class PgIndexStore(_StoreSharedMixin):
             reviewed_paths=reviewed_paths,
         )
 
+    def record_review_failure(
+        self,
+        pr_number: int,
+        pr_title: str,
+        pr_url: str,
+        error: str,
+        author: str = "",
+        created_at: float | None = None,
+    ) -> ReviewEvent:
+        """Persist a crashed review pass (status='failed', counters zeroed).
+
+        Mirrors IndexStore.record_review_failure — see there for the why.
+        """
+        now = created_at if created_at is not None else time.time()
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO review_events (owner, repo, pr_number, pr_title, pr_url, "
+                "status, error, author, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, 'failed', %s, %s, %s) RETURNING id",
+                (
+                    self._owner,
+                    self._repo,
+                    pr_number,
+                    pr_title,
+                    pr_url,
+                    error,
+                    author,
+                    now,
+                ),
+            )
+            row_id = cur.fetchone()[0]
+        return ReviewEvent(
+            id=row_id,
+            pr_number=pr_number,
+            pr_title=pr_title,
+            pr_url=pr_url,
+            comments_posted=0,
+            blockers=0,
+            warnings=0,
+            suggestions=0,
+            files_reviewed=0,
+            lines_changed=0,
+            tokens_used=0,
+            duration_ms=0,
+            categories="",
+            created_at=now,
+            author=author,
+            author_avatar_url="",
+            reviewed_paths="",
+            status="failed",
+            error=error,
+        )
+
     def upsert_pr_fingerprint(self, fp: PRFingerprint) -> None:
         now = fp.updated_at or time.time()
         with self._cursor() as cur:
@@ -896,7 +957,7 @@ class PgIndexStore(_StoreSharedMixin):
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author, author_avatar_url, reviewed_paths "
+            "categories, created_at, author, author_avatar_url, reviewed_paths, status, error "
             "FROM review_events WHERE owner=%s AND repo=%s "
             "ORDER BY created_at DESC LIMIT %s",
             (self._owner, self._repo, limit),
@@ -920,6 +981,8 @@ class PgIndexStore(_StoreSharedMixin):
                 author=r[14],
                 author_avatar_url=r[15],
                 reviewed_paths=r[16],
+                status=r[17] or "completed",
+                error=r[18] or "",
             )
             for r in rows
         ]
@@ -928,7 +991,7 @@ class PgIndexStore(_StoreSharedMixin):
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author, author_avatar_url, reviewed_paths "
+            "categories, created_at, author, author_avatar_url, reviewed_paths, status, error "
             "FROM review_events WHERE owner=%s AND repo=%s AND pr_number=%s "
             "ORDER BY created_at DESC",
             (self._owner, self._repo, pr_number),
@@ -952,6 +1015,8 @@ class PgIndexStore(_StoreSharedMixin):
                 author=r[14],
                 author_avatar_url=r[15],
                 reviewed_paths=r[16],
+                status=r[17] or "completed",
+                error=r[18] or "",
             )
             for r in rows
         ]
@@ -1099,7 +1164,8 @@ class PgIndexStore(_StoreSharedMixin):
             "COALESCE(SUM(warnings),0), COALESCE(SUM(suggestions),0), "
             "COALESCE(SUM(files_reviewed),0), COALESCE(SUM(lines_changed),0), "
             "COALESCE(SUM(tokens_used),0), COALESCE(AVG(duration_ms),0) "
-            f"FROM review_events WHERE owner=%s AND repo=%s{since_clause}",
+            "FROM review_events WHERE owner=%s AND repo=%s AND status != 'failed'"
+            f"{since_clause}",
             tuple(params),
         )
 
@@ -1108,7 +1174,8 @@ class PgIndexStore(_StoreSharedMixin):
             cat_params.append(since)
         cat_rows = self._fetchall(
             "SELECT categories FROM review_events "
-            f"WHERE owner=%s AND repo=%s AND categories != ''{since_clause}",
+            "WHERE owner=%s AND repo=%s AND categories != '' AND status != 'failed'"
+            f"{since_clause}",
             tuple(cat_params),
         )
         cat_counts: dict[str, int] = {}

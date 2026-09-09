@@ -87,6 +87,11 @@ CREATE TABLE IF NOT EXISTS review_events (
     categories TEXT NOT NULL DEFAULT '',
     author_avatar_url TEXT NOT NULL DEFAULT '',
     reviewed_paths TEXT NOT NULL DEFAULT '',
+    -- 'completed' for a finished pass; 'failed' marks a pass whose pipeline
+    -- crashed (LLM/provider/DB error). Failure rows carry a safe, secret-free
+    -- summary in `error` so the dashboard Activities feed can show them.
+    status TEXT NOT NULL DEFAULT 'completed',
+    error TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0
 );
 
@@ -265,6 +270,8 @@ class ReviewEvent:
     created_at: float = 0.0
     author_avatar_url: str = ""
     reviewed_paths: str = ""  # JSON array of filenames reviewed this pass
+    status: str = "completed"  # "completed" | "failed"
+    error: str = ""  # safe error summary for failed passes; "" otherwise
 
 
 @dataclass
@@ -387,11 +394,17 @@ class IndexStore(_StoreSharedMixin):
             self._conn.execute("ALTER TABLE files ADD COLUMN loc INTEGER NOT NULL DEFAULT 0")
         # Columns added to review_events post-schema (PR author + reviewed files).
         re_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(review_events)").fetchall()}
-        for col in ("author", "author_avatar_url", "reviewed_paths"):
+        for col in ("author", "author_avatar_url", "reviewed_paths", "error"):
             if col not in re_cols:
                 self._conn.execute(
                     f"ALTER TABLE review_events ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
                 )
+        # review_events.status: existing rows are completed passes, so the
+        # migration default must be 'completed', not ''.
+        if "status" not in re_cols:
+            self._conn.execute(
+                "ALTER TABLE review_events ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
+            )
         feedback_cols = {
             r[1] for r in self._conn.execute("PRAGMA table_info(feedback_events)").fetchall()
         }
@@ -727,11 +740,58 @@ class IndexStore(_StoreSharedMixin):
             reviewed_paths=reviewed_paths,
         )
 
+    def record_review_failure(
+        self,
+        pr_number: int,
+        pr_title: str,
+        pr_url: str,
+        error: str,
+        author: str = "",
+        created_at: float | None = None,
+    ) -> ReviewEvent:
+        """Persist a crashed review pass so it shows up in the activity feed.
+
+        Failure rows carry status='failed', every counter zeroed, and a safe
+        error summary (no secrets, no traceback) — the full traceback stays in
+        the server logs. Without this row a pipeline crash was only visible as
+        a log line plus an ephemeral in-memory progress failure.
+        """
+        now = created_at if created_at is not None else time.time()
+        self._conn.execute(
+            "INSERT INTO review_events "
+            "(pr_number, pr_title, pr_url, author, status, error, created_at) "
+            "VALUES (?, ?, ?, ?, 'failed', ?, ?)",
+            (pr_number, pr_title, pr_url, author, error, now),
+        )
+        self._conn.commit()
+        row_id = self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return ReviewEvent(
+            id=row_id,
+            pr_number=pr_number,
+            pr_title=pr_title,
+            pr_url=pr_url,
+            author=author,
+            comments_posted=0,
+            blockers=0,
+            warnings=0,
+            suggestions=0,
+            files_reviewed=0,
+            lines_changed=0,
+            tokens_used=0,
+            duration_ms=0,
+            categories="",
+            created_at=now,
+            author_avatar_url="",
+            reviewed_paths="",
+            status="failed",
+            error=error,
+        )
+
     def list_review_events(self, limit: int = 100) -> list[ReviewEvent]:
         rows = self._conn.execute(
             "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author_avatar_url, reviewed_paths "
+            "categories, created_at, author_avatar_url, reviewed_paths, status, error "
             "FROM review_events ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -754,6 +814,8 @@ class IndexStore(_StoreSharedMixin):
                 created_at=r[14],
                 author_avatar_url=r[15],
                 reviewed_paths=r[16],
+                status=r[17] or "completed",
+                error=r[18] or "",
             )
             for r in rows
         ]
@@ -762,7 +824,7 @@ class IndexStore(_StoreSharedMixin):
         rows = self._conn.execute(
             "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author_avatar_url, reviewed_paths "
+            "categories, created_at, author_avatar_url, reviewed_paths, status, error "
             "FROM review_events WHERE pr_number = ? ORDER BY created_at DESC",
             (pr_number,),
         ).fetchall()
@@ -785,6 +847,8 @@ class IndexStore(_StoreSharedMixin):
                 created_at=r[14],
                 author_avatar_url=r[15],
                 reviewed_paths=r[16],
+                status=r[17] or "completed",
+                error=r[18] or "",
             )
             for r in rows
         ]
@@ -926,8 +990,9 @@ class IndexStore(_StoreSharedMixin):
 
         Mira's differentiated signal: how much review attention a contributor's
         code drew. Keyed by GitHub login recorded on each review event.
+        Failed passes produced no findings, so they don't count here.
         """
-        where = "WHERE author = ?"
+        where = "WHERE author = ? AND status != 'failed'"
         params: list = [author]
         if since:
             where += " AND created_at >= ?"
@@ -962,8 +1027,14 @@ class IndexStore(_StoreSharedMixin):
         }
 
     def get_review_stats(self, since: float | None = None) -> dict:
-        """Aggregate review statistics, optionally filtered to events after *since* (epoch)."""
-        where = " WHERE created_at >= ?" if since else ""
+        """Aggregate review statistics, optionally filtered to events after *since* (epoch).
+
+        Failed passes are excluded: they posted no comments and counting them
+        as reviews would dilute per-review averages after an outage.
+        """
+        where = " WHERE status != 'failed'"
+        if since:
+            where += " AND created_at >= ?"
         params: tuple = (since,) if since else ()
 
         row = self._conn.execute(
@@ -975,8 +1046,11 @@ class IndexStore(_StoreSharedMixin):
             params,
         ).fetchone()
 
-        # Aggregate categories
-        cat_where = f" WHERE categories != ''{' AND created_at >= ?' if since else ''}"
+        # Aggregate categories (failed passes have none, but keep the filter
+        # symmetric with the count query above).
+        cat_where = " WHERE categories != '' AND status != 'failed'"
+        if since:
+            cat_where += " AND created_at >= ?"
         cat_params: tuple = (since,) if since else ()
         cat_rows = self._conn.execute(
             f"SELECT categories FROM review_events{cat_where}",
