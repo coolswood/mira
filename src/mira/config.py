@@ -169,6 +169,29 @@ class OverlapConfig(BaseModel):
     title_similarity_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
 
 
+class L10nConfig(BaseModel):
+    """Localization-consistency pass (translation QA on changed l10n keys).
+
+    Deterministic checks (key parity across locales, placeholder parity,
+    ICU structure, untranslated detection) never cost LLM quota. The LLM
+    step verifies meaning/grammar/formality of changed keys only, batched
+    by ``max_keys_per_call`` and capped at ``max_llm_calls`` per review.
+    Findings anchor to the changed key's line, so coverage is independent
+    of the diff-size budget that skips big localization files from the
+    main review.
+    """
+
+    enabled: bool = True
+    # File globs treated as localization files (checked by this pass and
+    # excluded from nothing else — the main review still sees them).
+    patterns: list[str] = Field(default_factory=lambda: ["*.arb"])
+    # Verify translations with the LLM, not just deterministic checks.
+    semantic_check: bool = True
+    # Changed (key × locale) rows per LLM call and calls per review.
+    max_keys_per_call: int = Field(default=30, ge=1, le=200)
+    max_llm_calls: int = Field(default=3, ge=0, le=20)
+
+
 class ReviewConfig(BaseModel):
     context_lines: int = Field(default=3, ge=0)
     # Total diff size cap. Above this, the diff is *not* truncated arbitrarily —
@@ -305,6 +328,7 @@ class MiraConfig(BaseModel):
     index: IndexConfig = Field(default_factory=IndexConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    l10n: L10nConfig = Field(default_factory=L10nConfig)
 
 
 def find_config_file(start_dir: Path | None = None) -> Path | None:
