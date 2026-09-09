@@ -105,6 +105,7 @@ INDEXABLE_LANGUAGES: frozenset[str] = frozenset(
         Language.RUST,
         Language.JAVA,
         Language.KOTLIN,
+        Language.DART,
         Language.CSHARP,
         Language.CPP,
         Language.C,

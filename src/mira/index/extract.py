@@ -32,6 +32,7 @@ _BRACE_LANGUAGES = {
     "kt",
     "scala",
     "php",
+    "dart",
 }
 
 # Python patterns
@@ -66,6 +67,25 @@ _JAVA_CLASS = re.compile(
     r"(?:class|interface|enum|record)\s+(\w+)"
 )
 _JAVA_CTOR = re.compile(r"^(\s*)(?:public|private|protected)\s+(\w+)\s*\(")
+
+# Dart patterns
+_DART_TYPE_DECL = re.compile(
+    r"^(\s*)(?:(?:abstract|base|final|sealed|interface)\s+)*"
+    r"(?:mixin\s+class|class|mixin|enum|extension)\s+(\w+)"
+)
+_DART_FUNCTION = re.compile(r"^(\s*)[\w$][\w$<>,? !.\[\]]*\s+(\w+)\s*\(")
+_DART_GETTER = re.compile(r"^(\s*)(?:static\s+)?(?:[\w$][\w$<>,? !.\[\]]*\s+)?get\s+(\w+)")
+_DART_CTOR = re.compile(r"^(\s*)(?:(?:const|factory)\s+)?(\w+)(?:\.(\w+))?\s*\(")
+# Line-initial words that can only start a statement, never a declaration —
+# guards the scanner against bodies it doesn't skip (field-initializer
+# closures and the like).
+_DART_STATEMENT_KEYWORDS = frozenset(
+    (
+        "if", "else", "for", "while", "do", "switch", "case", "default",
+        "try", "catch", "finally", "return", "throw", "rethrow", "break",
+        "continue", "await", "yield", "assert",
+    )
+)
 
 
 @dataclass
@@ -200,6 +220,8 @@ def _extract_brace_based(source: str, language: str) -> list[SymbolSpan]:
         return _extract_rust(lines)
     if lang in ("java",):
         return _extract_java(lines)
+    if lang in ("dart",):
+        return _extract_dart(lines)
     # Default: JS/TS/C-like
     return _extract_js_ts(lines)
 
@@ -418,6 +440,100 @@ def _extract_java(lines: list[str]) -> list[SymbolSpan]:
                     qualified_name=f"{enclosing[-1][0]}.{name}",
                 )
             )
+            i = end + 1
+            continue
+
+        i += 1
+
+    return symbols
+
+
+def _extract_dart(lines: list[str]) -> list[SymbolSpan]:
+    """Extract symbols from Dart/Flutter sources.
+
+    Descends into class/mixin/enum/extension bodies (methods are qualified
+    with the enclosing type, mirroring the Java extractor) and also captures
+    top-level functions, which are common in Dart. Function signatures carry
+    a mandatory return type, so statements like ``if (...)`` can't false-match;
+    block-bodied getters are matched explicitly and their bodies skipped;
+    constructor/factory signatures have no return type and are matched
+    against the enclosing type name — named ones keep their constructor
+    name (``factory X.fromJson`` → ``X.fromJson``).
+    """
+    symbols: list[SymbolSpan] = []
+    enclosing: list[tuple[str, int]] = []  # (type name, body end index)
+
+    i = 0
+    while i < len(lines):
+        while enclosing and enclosing[-1][1] < i:
+            enclosing.pop()
+        line = lines[i]
+
+        decl_match = _DART_TYPE_DECL.match(line)
+        if decl_match:
+            end = _find_brace_end(lines, i)
+            symbols.append(
+                SymbolSpan(
+                    name=decl_match.group(2),
+                    kind="class",
+                    start_line=i + 1,
+                    end_line=end + 1,
+                    source="\n".join(lines[i : end + 1]),
+                )
+            )
+            enclosing.append((decl_match.group(2), end))
+            i += 1
+            continue
+
+        is_statement = (
+            line.lstrip().split(maxsplit=1)[0] in _DART_STATEMENT_KEYWORDS
+            if line.strip()
+            else False
+        )
+
+        # Getters have no parameter list, so _DART_FUNCTION can't see them;
+        # without an explicit match their bodies would be scanned line by
+        # line and control flow inside would false-match as methods.
+        getter_match = _DART_GETTER.match(line)
+
+        fn_match = None if is_statement else _DART_FUNCTION.match(line)
+
+        ctor_match = None
+        if not fn_match and not getter_match and not is_statement and enclosing:
+            ctor = _DART_CTOR.match(line)
+            if ctor and ctor.group(2) == enclosing[-1][0]:
+                ctor_match = ctor
+
+        match = getter_match or fn_match or ctor_match
+        if match:
+            # Abstract members and `=>` expressions have no body — the span
+            # is the declaration line itself.
+            braceless = ";" in line and "{" not in line
+            end = i if braceless else _find_brace_end(lines, i)
+            name = match.group(2)
+            if ctor_match and ctor_match.group(3):
+                name = ctor_match.group(3)  # named constructor: Class.name
+            if enclosing:
+                symbols.append(
+                    SymbolSpan(
+                        name=name,
+                        kind="method",
+                        start_line=i + 1,
+                        end_line=end + 1,
+                        source="\n".join(lines[i : end + 1]),
+                        qualified_name=f"{enclosing[-1][0]}.{name}",
+                    )
+                )
+            else:
+                symbols.append(
+                    SymbolSpan(
+                        name=name,
+                        kind="function",
+                        start_line=i + 1,
+                        end_line=end + 1,
+                        source="\n".join(lines[i : end + 1]),
+                    )
+                )
             i = end + 1
             continue
 
