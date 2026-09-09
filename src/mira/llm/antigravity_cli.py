@@ -126,7 +126,7 @@ class AntigravityCLIProvider:
             env["GEMINI_API_KEY"] = api_key
         return env
 
-    def _prepare_gemini_home(self, invocation_root: str) -> None:
+    def _prepare_gemini_home(self, runtime_home: str) -> None:
         """Populate the ephemeral HOME's ``.gemini`` directory for one call.
 
         With ``antigravity_home`` configured, its contents are trusted
@@ -134,7 +134,7 @@ class AntigravityCLIProvider:
         copied verbatim. With API-key auth, a minimal settings.json selecting
         the Gemini provider is written unless the copied home already has one.
         """
-        gemini_dir = Path(invocation_root) / "gemini"
+        gemini_dir = Path(runtime_home) / ".gemini"
         gemini_dir.mkdir(parents=True, mode=0o700)
         source_home = self.config.antigravity_home
         if source_home:
@@ -208,7 +208,7 @@ class AntigravityCLIProvider:
         with tempfile.TemporaryDirectory(prefix="mira-antigravity-") as tmpdir:
             runtime_home = str(Path(tmpdir) / "runtime")
             Path(runtime_home).mkdir(mode=0o700)
-            self._prepare_gemini_home(tmpdir)
+            self._prepare_gemini_home(runtime_home)
             cmd = self._command()
             logger.debug("Running Antigravity CLI provider: %s", shlex.join(cmd + ["<stdin>"]))
             try:
