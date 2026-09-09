@@ -86,7 +86,7 @@ async def test_pr_opened_blocked_author_filtered(client):
             },
         )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()
 
 
@@ -111,7 +111,7 @@ async def test_pr_opened_allowed_author_not_filtered(client):
             },
         )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     h.assert_awaited_once()
 
 
@@ -136,7 +136,7 @@ async def test_pr_opened_allowlist_filters_off_list(client):
             },
         )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()
 
 
@@ -161,7 +161,7 @@ async def test_comment_review_bypass(client):
             },
         )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     h.assert_awaited_once()
 
 
@@ -186,5 +186,5 @@ async def test_comment_non_review_no_bypass(client):
             },
         )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()

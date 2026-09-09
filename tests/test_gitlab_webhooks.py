@@ -84,7 +84,7 @@ async def test_mr_open_triggers_review(client):
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
         )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -95,7 +95,7 @@ async def test_mr_update_without_newcommits_ignored(client):
             content=json.dumps(_mr_payload(action="update")),  # no oldrev = no new commits
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
         )
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()
 
 
@@ -109,7 +109,7 @@ async def test_self_authored_event_ignored(client, gitlab_auth):
             content=json.dumps(payload),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
         )
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()
 
 
@@ -131,7 +131,7 @@ async def test_note_mention_triggers_command(client):
             content=json.dumps(_note_payload()),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
         )
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -142,7 +142,7 @@ async def test_note_without_mention_ignored(client):
             content=json.dumps(_note_payload(note="looks good")),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
         )
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()
 
 
@@ -154,7 +154,7 @@ async def test_mr_merge_triggers_learning(client):
             content=json.dumps(_mr_payload(action="merge")),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
         )
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -243,7 +243,7 @@ async def test_mr_open_blocked_author_filtered(client):
             content=json.dumps(payload),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
         )
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()
 
 
@@ -261,7 +261,7 @@ async def test_mr_open_allowed_author_not_filtered(client):
             content=json.dumps(payload),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
         )
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     h.assert_awaited_once()
 
 
@@ -279,7 +279,7 @@ async def test_mr_open_allowlist_filters_off_list(client):
             content=json.dumps(payload),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
         )
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()
 
 
@@ -297,7 +297,7 @@ async def test_note_review_bypass_for_blocked_author(client):
             content=json.dumps(payload),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
         )
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     h.assert_awaited_once()
 
 
@@ -315,5 +315,5 @@ async def test_note_non_review_no_bypass(client):
             content=json.dumps(payload),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Note Hook"},
         )
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     h.assert_not_called()

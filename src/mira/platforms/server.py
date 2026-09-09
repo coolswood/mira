@@ -156,8 +156,14 @@ def create_app(
             )
         event = request.headers.get("X-GitHub-Event", "")
         payload: dict[str, Any] = await request.json()
-        status = await dispatch_github_event(event, payload, app_auth, bot_name, background_tasks)
-        return _json_status(status)
+        # Ack before dispatch: GitHub aborts deliveries that don't respond in
+        # time, and dispatching awaits GitHub API calls (bot identity), so any
+        # API latency here surfaced as a lost webhook. Signature-verified
+        # events are queued and run after the response has been sent.
+        background_tasks.add_task(
+            dispatch_github_event, event, payload, app_auth, bot_name, background_tasks
+        )
+        return _json_status("accepted")
 
     if gitlab_auth is not None and gitlab_webhook_secret is not None:
         from mira.platforms.gitlab.webhook import dispatch_gitlab_event, verify_gitlab_token
@@ -173,10 +179,10 @@ def create_app(
                 )
             event = request.headers.get("X-Gitlab-Event", "")
             payload = await request.json()
-            status = await dispatch_gitlab_event(
-                event, payload, gitlab_auth, bot_name, background_tasks
+            background_tasks.add_task(
+                dispatch_gitlab_event, event, payload, gitlab_auth, bot_name, background_tasks
             )
-            return _json_status(status)
+            return _json_status("accepted")
 
     if forgejo_auth is not None and forgejo_webhook_secret is not None:
         from mira.platforms.forgejo.webhook import (
@@ -196,10 +202,10 @@ def create_app(
                 )
             event = request.headers.get("X-Forgejo-Event", "")
             payload = await request.json()
-            status = await dispatch_forgejo_event(
-                event, payload, forgejo_auth, bot_name, background_tasks
+            background_tasks.add_task(
+                dispatch_forgejo_event, event, payload, forgejo_auth, bot_name, background_tasks
             )
-            return _json_status(status)
+            return _json_status("accepted")
 
     from mira.dashboard.api import register_dashboard
 

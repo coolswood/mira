@@ -80,7 +80,7 @@ async def test_github_pr_event_dispatches(client):
             content=body,
             headers={"X-Hub-Signature-256": _gh_sig(body), "X-GitHub-Event": "pull_request"},
         )
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     h.assert_awaited_once()
 
 
@@ -114,5 +114,5 @@ async def test_gitlab_mr_event_dispatches(client):
             content=json.dumps(payload),
             headers={"X-Gitlab-Token": GL_SECRET, "X-Gitlab-Event": "Merge Request Hook"},
         )
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     h.assert_awaited_once()

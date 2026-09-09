@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -144,6 +145,64 @@ async def test_health_closes_postgres_probe_connection(
     assert len(closed) == 2
 
 
+async def test_webhook_acks_before_dispatch(app) -> None:  # noqa: ANN001
+    """A verified event is acknowledged before dispatching starts.
+
+    GitHub aborts deliveries that take too long to respond, so the route must
+    write the response while the dispatcher is still pending — otherwise any
+    latency in the dispatch path (GitHub API calls, event-loop contention)
+    turns into a silently lost webhook.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_dispatch(event, payload, auth, bot_name, background_tasks):  # noqa: ANN001
+        started.set()
+        await release.wait()
+        return "processing"
+
+    payload_bytes = json.dumps(_comment_payload(f"@{BOT_NAME} review")).encode()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/github/webhook",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"x-github-event", b"issue_comment"),
+            (b"x-hub-signature-256", _sign(payload_bytes).encode()),
+        ],
+        "client": ("testclient", 12345),
+        "server": ("testserver", 80),
+    }
+    body_sent = False
+    messages: list[dict] = []
+
+    async def receive():  # noqa: ANN202
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": payload_bytes, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message) -> None:  # noqa: ANN001
+        messages.append(message)
+
+    with patch("mira.platforms.server.dispatch_github_event", blocked_dispatch):
+        run = asyncio.ensure_future(app(scope, receive, send))
+        await started.wait()
+        # The dispatcher is still blocked, yet the response must already be
+        # fully written to the wire.
+        body_messages = [m for m in messages if m["type"] == "http.response.body"]
+        assert b'"accepted"' in b"".join(m.get("body", b"") for m in body_messages)
+        release.set()
+        await run
+
+
 async def test_invalid_signature(client: AsyncClient) -> None:
     payload = json.dumps({"action": "opened"}).encode()
     resp = await client.post(
@@ -171,7 +230,7 @@ async def test_pr_opened_triggers_handler(mock_handler: AsyncMock, client: Async
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     # BackgroundTasks runs synchronously in test, so handler should have been called
     mock_handler.assert_awaited_once()
 
@@ -189,7 +248,7 @@ async def test_pr_closed_ignored(client: AsyncClient) -> None:
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
 
 
 @patch("mira.platforms.github.webhook.handle_comment", new_callable=AsyncMock)
@@ -208,7 +267,7 @@ async def test_comment_with_mention_triggers_handler(
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     mock_handler.assert_awaited_once()
 
 
@@ -225,7 +284,7 @@ async def test_comment_without_mention_ignored(client: AsyncClient) -> None:
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
 
 
 async def test_comment_on_issue_not_pr_ignored(client: AsyncClient) -> None:
@@ -241,7 +300,7 @@ async def test_comment_on_issue_not_pr_ignored(client: AsyncClient) -> None:
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
 
 
 # ── pull_request_review_comment tests ────────────────────────────────────────
@@ -280,7 +339,7 @@ async def test_review_comment_reject_triggers_handler(
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     mock_handler.assert_awaited_once()
 
 
@@ -297,7 +356,7 @@ async def test_review_comment_without_mention_ignored(client: AsyncClient) -> No
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
 
 
 async def test_review_comment_from_bot_self_ignored(client: AsyncClient) -> None:
@@ -313,7 +372,7 @@ async def test_review_comment_from_bot_self_ignored(client: AsyncClient) -> None
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
 
 
 # ── pause / resume / ignore tests ────────────────────────────────────────────
@@ -335,7 +394,7 @@ async def test_pr_with_paused_label_returns_paused(
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "paused"
+    assert resp.json()["status"] == "accepted"
     mock_handler.assert_not_awaited()
 
 
@@ -353,7 +412,7 @@ async def test_pr_with_ignore_in_description(mock_handler: AsyncMock, client: As
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ignored"
+    assert resp.json()["status"] == "accepted"
     mock_handler.assert_not_awaited()
 
 
@@ -374,7 +433,7 @@ async def test_pause_comment_dispatches_pause_handler(
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     mock_pause.assert_awaited_once()
     mock_comment.assert_not_awaited()
 
@@ -396,7 +455,7 @@ async def test_resume_comment_dispatches_pause_handler(
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     mock_pause.assert_awaited_once()
     mock_comment.assert_not_awaited()
 
@@ -418,7 +477,7 @@ async def test_review_comment_still_dispatches_handle_comment(
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["status"] == "processing"
+    assert resp.json()["status"] == "accepted"
     mock_comment.assert_awaited_once()
 
 
@@ -445,8 +504,7 @@ async def test_pr_opened_blocked_author_filtered(
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
     payload = _make_pr_payload()
     payload["sender"] = {"login": "dependabot[bot]"}
-    result = await _post(client, "pull_request", payload)
-    assert result["status"] == "ignored"
+    await _post(client, "pull_request", payload)
     mock_handler.assert_not_awaited()
 
 
@@ -458,8 +516,7 @@ async def test_pr_synchronize_skipped_when_review_on_synchronize_off(
     mock_load_config.return_value = MiraConfig(review=ReviewConfig(review_on_synchronize=False))
     payload = _make_pr_payload(action="synchronize")
     payload["sender"] = {"login": "alice"}
-    result = await _post(client, "pull_request", payload)
-    assert result["status"] == "ignored"
+    await _post(client, "pull_request", payload)
     mock_handler.assert_not_awaited()
 
 
@@ -471,8 +528,7 @@ async def test_pr_opened_still_reviewed_when_review_on_synchronize_off(
     mock_load_config.return_value = MiraConfig(review=ReviewConfig(review_on_synchronize=False))
     payload = _make_pr_payload(action="opened")
     payload["sender"] = {"login": "alice"}
-    result = await _post(client, "pull_request", payload)
-    assert result["status"] == "processing"
+    await _post(client, "pull_request", payload)
     mock_handler.assert_awaited_once()
 
 
@@ -484,8 +540,7 @@ async def test_pr_synchronize_reviewed_by_default(
     mock_load_config.return_value = MiraConfig()
     payload = _make_pr_payload(action="synchronize")
     payload["sender"] = {"login": "alice"}
-    result = await _post(client, "pull_request", payload)
-    assert result["status"] == "processing"
+    await _post(client, "pull_request", payload)
     mock_handler.assert_awaited_once()
 
 
@@ -497,8 +552,7 @@ async def test_pr_opened_allowed_author_not_filtered(
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
     payload = _make_pr_payload()
     payload["sender"] = {"login": "alice"}
-    result = await _post(client, "pull_request", payload)
-    assert result["status"] == "processing"
+    await _post(client, "pull_request", payload)
     mock_handler.assert_awaited_once()
 
 
@@ -510,8 +564,7 @@ async def test_pr_opened_allowlist_filters_off_list(
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(allowed_authors=["alice"]))
     payload = _make_pr_payload()
     payload["sender"] = {"login": "bob"}
-    result = await _post(client, "pull_request", payload)
-    assert result["status"] == "ignored"
+    await _post(client, "pull_request", payload)
     mock_handler.assert_not_awaited()
 
 
@@ -527,8 +580,7 @@ async def test_push_blocked_author_filtered(
         "repository": {"default_branch": "main"},
         "installation": {"id": 1},
     }
-    result = await _post(client, "push", payload)
-    assert result["status"] == "ignored"
+    await _post(client, "push", payload)
     mock_handler.assert_not_awaited()
 
 
@@ -541,8 +593,7 @@ async def test_comment_review_bypass_for_blocked_author(
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
     payload = _comment_payload(f"@{BOT_NAME} review")
     payload["comment"]["user"]["login"] = "dependabot[bot]"
-    result = await _post(client, "issue_comment", payload)
-    assert result["status"] == "processing"
+    await _post(client, "issue_comment", payload)
     mock_handler.assert_awaited_once()
 
 
@@ -554,8 +605,7 @@ async def test_comment_non_review_no_bypass(
     """Non-review commands do NOT bypass the author filter."""
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(blocked_authors=["alice"]))
     payload = _comment_payload(f"@{BOT_NAME} pause")
-    result = await _post(client, "issue_comment", payload)
-    assert result["status"] == "ignored"
+    await _post(client, "issue_comment", payload)
     mock_handler.assert_not_awaited()
 
 
@@ -568,6 +618,5 @@ async def test_comment_case_insensitive_review_bypass(
     mock_load_config.return_value = MiraConfig(filter=FilterConfig(blocked_authors=["dependabot"]))
     payload = _comment_payload(f"@{BOT_NAME} Review")
     payload["comment"]["user"]["login"] = "dependabot[bot]"
-    result = await _post(client, "issue_comment", payload)
-    assert result["status"] == "processing"
+    await _post(client, "issue_comment", payload)
     mock_handler.assert_awaited_once()
