@@ -34,6 +34,20 @@ def _is_local_host(host: str) -> bool:
     return ip.is_loopback or ip.is_private or ip.is_link_local
 
 
+class CompareModelConfig(BaseModel):
+    """One extra model that shadows every review for side-by-side comparison.
+
+    ``provider`` is a model-catalog backend name ("codex-cli",
+    "antigravity-cli", ...); empty means the deployment's active provider.
+    Shadow reviews post nothing to the platform — results land in the
+    dashboard's compare view with this model's name attached.
+    """
+
+    provider: str = ""
+    model: str
+    reasoning_effort: str | None = None
+
+
 class LLMConfig(BaseModel):
     model: str = "anthropic/claude-sonnet-4-6"
     fallback_model: str | None = None
@@ -45,6 +59,11 @@ class LLMConfig(BaseModel):
     # the security sweep is the highest-stakes pass and must not silently
     # downgrade to the indexing tier.
     security_model: str | None = None
+    # Extra models that review every PR in parallel with the review-tier model
+    # (shadow passes — posted nowhere, compared in the dashboard). Deployment
+    # setting only; the dashboard stores its list in the settings table under
+    # `compare_models` and it wins over this field.
+    compare_models: list[CompareModelConfig] = Field(default_factory=list)
     # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max";
     # None/"off" = no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
     # `reasoning_effort` is the resolved value the provider reads (set by
@@ -384,6 +403,7 @@ _DEPLOYMENT_ONLY_LLM_KEYS = frozenset(
         "antigravity_api_key",
         "antigravity_sandbox",
         "antigravity_timeout_seconds",
+        "compare_models",
     }
 )
 

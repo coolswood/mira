@@ -66,15 +66,17 @@ from mira.security.secrets_scan import scan_secrets
 logger = logging.getLogger(__name__)
 
 
-def _progress_key(pr_info: PRInfo | None) -> str | None:
+def _progress_key(pr_info: PRInfo | None, suffix: str = "") -> str | None:
     """Live-progress job key for the PR being reviewed, if known.
 
     None (CLI review_diff path, tests) simply no-ops every tracker call —
-    the tracker treats unknown keys as no-ops by design.
+    the tracker treats unknown keys as no-ops by design. Shadow compare runs
+    pass a suffix so their job coexists with the main review's job.
     """
     if pr_info is None:
         return None
-    return f"{pr_info.owner}/{pr_info.repo}#{pr_info.number}"
+    key = f"{pr_info.owner}/{pr_info.repo}#{pr_info.number}"
+    return f"{key}{suffix}" if suffix else key
 
 
 def _audit_drop(c: ReviewComment, stage: str, reason: str = "") -> dict:
@@ -398,6 +400,8 @@ class ReviewEngine:
         dry_run: bool = False,
         indexing_llm: LLMProviderProtocol | None = None,
         security_llm: LLMProviderProtocol | None = None,
+        shadow: bool = False,
+        model_label: str = "",
     ) -> None:
         self.config = config
         self.llm = llm
@@ -406,6 +410,17 @@ class ReviewEngine:
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
+        # Shadow mode (parallel-model comparison): run the same review
+        # pipeline but write nothing to the platform and mutate none of the
+        # per-PR review state. The pass is still recorded in the per-repo
+        # store (kind='compare') — that's the dashboard's only data path.
+        self.shadow = shadow
+        # Model id recorded on the review event (attribution for the compare
+        # view and the activity feed).
+        self.model_label = model_label
+        # Appended to the progress job key by shadow runners so their job
+        # doesn't clobber the main review's (see _progress_key).
+        self._progress_suffix = ""
         # `_jit_needed` (per-PR: index has no summaries for *this PR's* files)
         # is not the same as `_index_was_empty` (whole-repo: no data at all).
         # Only the latter drives the user-visible "your repo isn't indexed" nudge.
@@ -541,7 +556,9 @@ class ReviewEngine:
             # When auto-resolve is off we skip the thread-resolution path
             # entirely — no fetch, no verify, no resolve. Round detection is
             # unaffected; it runs off the separate get_all_bot_threads call below.
-            if not self.bot_name or not self.config.review.auto_resolve_conversations:
+            # Shadow passes never resolve (or mutate anything else) — they only
+            # read, and thread resolution's GraphQL writes belong to the main run.
+            if self.shadow or not self.bot_name or not self.config.review.auto_resolve_conversations:
                 return 0, 0, [], []
             try:
                 assert self.provider is not None
@@ -564,7 +581,7 @@ class ReviewEngine:
         )
 
         placeholder_id: int | None = None
-        if not self.dry_run:
+        if not self.dry_run and not self.shadow:
             try:
                 placeholder_id = await self._post_placeholder_comment(pr_info)
             except Exception as exc:
@@ -684,9 +701,11 @@ class ReviewEngine:
         # Cross-PR overlap detection runs alongside the main review — it only
         # needs the diff + GitHub, not the review output. Skipped when the
         # review itself is skipped (empty incremental diff): findings only
-        # surface in the walkthrough, which won't be posted.
+        # surface in the walkthrough, which won't be posted. Shadow passes
+        # skip it too: it upserts PR fingerprints, and its findings only
+        # surface in the (never-posted) walkthrough.
         overlap_task = None
-        if diff_text.strip():
+        if diff_text.strip() and not self.shadow:
             overlap_task = _asyncio.create_task(self._detect_overlaps_safe(pr_info, full_diff_text))
 
         try:
@@ -883,12 +902,15 @@ class ReviewEngine:
             from mira.core.progress import tracker as _progress_tracker
 
             _progress_tracker.set_stage(
-                _progress_key(self._pr_info), "posting", f"{len(result.comments)} comment(s)"
+                _progress_key(self._pr_info, getattr(self, "_progress_suffix", "")),
+                "posting",
+                f"{len(result.comments)} comment(s)",
             )
         if result.comments:
-            if self.dry_run:
+            if self.dry_run or self.shadow:
                 logger.info(
-                    "Dry run: would post %d comment(s) on PR %s",
+                    "%s: would post %d comment(s) on PR %s",
+                    "Shadow compare pass" if self.shadow else "Dry run",
                     len(result.comments),
                     pr_info.url,
                 )
@@ -931,6 +953,9 @@ class ReviewEngine:
                 author=pr_info.author,
                 author_avatar_url=pr_info.author_avatar_url,
                 reviewed_paths=reviewed_paths_json,
+                model=self.model_label,
+                kind="compare" if self.shadow else "review",
+                head_sha=pr_info.head_sha or "",
             )
             # Persist each comment Mira posted so the dashboard can show the
             # actual review conversation, not just aggregate counts.
@@ -958,47 +983,54 @@ class ReviewEngine:
             try:
                 from mira.analysis.feedback import synthesize_rules
 
-                synthesize_rules(store)
+                # Shadow passes don't feed the rule learner — their findings
+                # are comparison artifacts, not accepted review output.
+                if not self.shadow:
+                    synthesize_rules(store)
             except Exception as synth_err:
                 logger.debug("Feedback synthesis failed: %s", synth_err)
             store.close()
 
             # Merge with any prior progress for this PR so @miracodeai review-rest
-            # can target only the still-unreviewed paths.
-            try:
-                from mira.dashboard.api import _app_db
-                from mira.dashboard.db import PRReviewProgress
+            # can target only the still-unreviewed paths. Shadow passes leave
+            # review progress alone — the main run owns the round bookkeeping.
+            if not self.shadow:
+                try:
+                    from mira.dashboard.api import _app_db
+                    from mira.dashboard.db import PRReviewProgress
 
-                prior = _app_db.get_pr_review_progress(
-                    pr_info.owner,
-                    pr_info.repo,
-                    pr_info.number,
-                    platform=pr_info.platform,
-                )
-                prior_reviewed = set(prior.reviewed_paths) if prior else set()
-                prior_skipped = set(prior.skipped_paths) if prior else set()
-                new_reviewed = prior_reviewed | set(result.reviewed_paths)
-                new_skipped = (prior_skipped | set(result.skipped_paths)) - new_reviewed
-                _app_db.upsert_pr_review_progress(
-                    PRReviewProgress(
-                        owner=pr_info.owner,
-                        repo=pr_info.repo,
-                        pr_number=pr_info.number,
-                        total_paths=result.total_paths or list(new_reviewed | new_skipped),
-                        reviewed_paths=sorted(new_reviewed),
-                        skipped_paths=sorted(new_skipped),
-                        chunk_index=(prior.chunk_index + 1) if prior else 1,
-                    ),
-                    platform=pr_info.platform,
-                )
-            except Exception as progress_err:
-                logger.debug("Failed to persist review progress: %s", progress_err)
+                    prior = _app_db.get_pr_review_progress(
+                        pr_info.owner,
+                        pr_info.repo,
+                        pr_info.number,
+                        platform=pr_info.platform,
+                    )
+                    prior_reviewed = set(prior.reviewed_paths) if prior else set()
+                    prior_skipped = set(prior.skipped_paths) if prior else set()
+                    new_reviewed = prior_reviewed | set(result.reviewed_paths)
+                    new_skipped = (prior_skipped | set(result.skipped_paths)) - new_reviewed
+                    _app_db.upsert_pr_review_progress(
+                        PRReviewProgress(
+                            owner=pr_info.owner,
+                            repo=pr_info.repo,
+                            pr_number=pr_info.number,
+                            total_paths=result.total_paths or list(new_reviewed | new_skipped),
+                            reviewed_paths=sorted(new_reviewed),
+                            skipped_paths=sorted(new_skipped),
+                            chunk_index=(prior.chunk_index + 1) if prior else 1,
+                        ),
+                        platform=pr_info.platform,
+                    )
+                except Exception as progress_err:
+                    logger.debug("Failed to persist review progress: %s", progress_err)
         except Exception as exc:
             logger.debug("Failed to record review event: %s", exc)
 
         # Anchor the SHA even on zero-finding rounds; without it round 2 has
-        # nothing to compare against and falls back to a full review.
-        if pr_info.head_sha:
+        # nothing to compare against and falls back to a full review. The
+        # main run owns the anchor — a shadow pass writing it would make the
+        # next round "incremental" against a SHA only the shadow reviewed.
+        if pr_info.head_sha and not self.shadow:
             try:
                 from mira.dashboard.api import _app_db
 
@@ -1068,7 +1100,9 @@ class ReviewEngine:
 
         from mira.core.progress import tracker as progress_tracker
 
-        p_key = _progress_key(getattr(self, "_pr_info", None))
+        p_key = _progress_key(
+            getattr(self, "_pr_info", None), getattr(self, "_progress_suffix", "")
+        )
         progress_tracker.set_files(p_key, len(selected))
 
         all_paths = [f.path for f in filtered]
@@ -1098,7 +1132,10 @@ class ReviewEngine:
         filtered = selected
 
         async def _generate_walkthrough() -> WalkthroughResult | None:
-            if not self.config.review.walkthrough:
+            if not self.config.review.walkthrough or self.shadow:
+                # Shadow passes skip the walkthrough: it costs a full review-
+                # tier call and its only output channel is the PR comment
+                # the shadow never posts.
                 return None
             try:
                 wt_messages = build_walkthrough_prompt(
@@ -1460,7 +1497,7 @@ class ReviewEngine:
                 security_llm=self.security_llm,
                 agentic_executor_factory=_security_executor_factory,
             )
-            if self.config.review.security_pass
+            if self.config.review.security_pass and not self.shadow
             else _asyncio.sleep(0, result=[])
         )
 
@@ -1468,7 +1505,12 @@ class ReviewEngine:
         # most PRs pay nothing. When it does, fetch the repo's existing package
         # names from the index so the pass can spot a duplicate of one already
         # present (empty list on an unindexed repo — pass falls back to the diff).
-        manifest_files = manifest_candidates
+        # Shadow compare passes run the chunk reviews only — the side passes
+        # (security/dependency/osv/secrets/l10n) don't depend on the review
+        # model, so re-running them per compared model would repeat identical
+        # work N times and muddy the comparison with same-model findings.
+        _shadow = self.shadow
+        manifest_files = [] if _shadow else manifest_candidates
         existing_packages: list[str] = []
         pr_source_fetcher = None
         if manifest_files:
@@ -1514,7 +1556,7 @@ class ReviewEngine:
 
         secrets_task = _asyncio.create_task(
             scan_secrets(filtered)
-            if filtered and self.config.review.secrets_scan
+            if filtered and self.config.review.secrets_scan and not _shadow
             else _asyncio.sleep(0, result=[])
         )
 
@@ -1524,7 +1566,7 @@ class ReviewEngine:
         # skipped from the main review. Zero cost when no l10n file changed.
         l10n_files = (
             [f for f in filtered if is_l10n_path(f.path, self.config.l10n.patterns)]
-            if self.config.l10n.enabled
+            if self.config.l10n.enabled and not _shadow
             else []
         )
         l10n_task = _asyncio.create_task(
@@ -1583,8 +1625,11 @@ class ReviewEngine:
         _audit_stage(audit, "noise_filter", all_comments, final_comments)
 
         # Dedupe against still-open threads before self-critique, so we don't
-        # spend critique calls on comments we'd discard anyway.
-        if existing_comments:
+        # spend critique calls on comments we'd discard anyway. Shadow passes
+        # skip it on purpose: their raw overlap with the main model's findings
+        # IS the comparison signal — dropping dupes of already-posted threads
+        # would hide exactly the "both models found it" cases.
+        if existing_comments and not self.shadow:
             before_drop = final_comments
             final_comments = drop_already_posted(final_comments, existing_comments)
             _audit_stage(audit, "already_posted", before_drop, final_comments)
@@ -1623,7 +1668,7 @@ class ReviewEngine:
 
         all_key_issues = _drop_orphan_key_issues(all_key_issues, final_comments)
 
-        if self.config.review.include_summary:
+        if self.config.review.include_summary and not self.shadow:
             original_summary = " ".join(summaries) if summaries else ""
             # Regenerate from the FINAL filed outputs so summary prose can't
             # claim issues that were dropped by the filter/critique passes.
