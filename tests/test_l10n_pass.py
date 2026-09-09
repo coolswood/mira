@@ -419,6 +419,41 @@ async def test_pass_falls_back_to_heuristic_without_l10n_yaml() -> None:
     assert not any("Ключа нет в шаблоне" in c.title for c in comments)
 
 
+async def test_pass_groups_root_level_files_into_one_family() -> None:
+    # Regression: rsplit("/", 1)[0] on a slash-less path returns the
+    # filename itself, so every root-level arb file became its own
+    # "directory" — siblings were never fetched and never cross-checked.
+    root_files = {"app_ru.arb": RU, "app_de.arb": DE, "app_it.arb": IT}
+    provider = FakeProvider(root_files)
+    llm = FakeLLM()
+    diffed = [
+        _fdiff(
+            "app_ru.arb",
+            [
+                '"greeting": "Привет, {name}!",',
+                '"visits_one": "Это твой {days} визит",',
+                '"brand_new": "Добро пожаловать в наше прекрасное приложение"',
+            ],
+        )
+    ]
+    comments = await l10n_review_pass(
+        llm,
+        diffed,
+        provider=provider,
+        pr_info=_pr_info(),
+        repo_tree=["app_ru.arb", "app_de.arb", "app_it.arb"],
+        pr_title="l10n update",
+        config=L10nConfig(max_llm_calls=0),
+    )
+    assert llm.calls == 0
+    # Sibling locales were fetched and cross-checked against the template:
+    # visits_one missing in de/it, brand_new untranslated in de.
+    assert "app_de.arb" in provider.fetched
+    assert "app_it.arb" in provider.fetched
+    assert any("Перевод неполный" in c.title and "visits_one" in c.title for c in comments)
+    assert any("Возможно, непереведённая" in c.title for c in comments)
+
+
 def test_build_rows_dedupes_and_covers_family() -> None:
     ru = parse_arb("lib/l10n/app_ru.arb", RU)
     de = parse_arb("lib/l10n/app_de.arb", DE)

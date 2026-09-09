@@ -126,6 +126,17 @@ def _parse_l10n_yaml(content: str) -> tuple[str, str]:
     return arb_dir, template
 
 
+def _parent_dir(path: str) -> str:
+    """Directory part of a repo path; root-level files share ``""``.
+
+    ``path.rsplit("/", 1)[0]`` alone returns the filename itself for
+    slash-less paths, which makes every root-level localization file its
+    own "directory" and silently breaks family grouping between sibling
+    locales living in the repository root.
+    """
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
+
 def _discover_family(
     tree_paths: list[str],
     patterns: list[str],
@@ -139,13 +150,13 @@ def _discover_family(
     all_arb = [p for p in tree_paths if is_l10n_path(p, patterns)] if tree_paths else []
     if not all_arb:
         all_arb = sorted(diffed_paths)
-    dirs = {p.rsplit("/", 1)[0] for p in diffed_paths}
-    family = [p for p in all_arb if p.rsplit("/", 1)[0] in dirs]
+    dirs = {_parent_dir(p) for p in diffed_paths}
+    family = [p for p in all_arb if _parent_dir(p) in dirs]
     template = None
     if family:
         by_dir: dict[str, list[str]] = {}
         for p in family:
-            by_dir.setdefault(p.rsplit("/", 1)[0], []).append(p)
+            by_dir.setdefault(_parent_dir(p), []).append(p)
         # The directory holding the most diffed files wins (arb-dir, not src modules).
         main_dir = max(by_dir, key=lambda d: sum(1 for p in by_dir[d] if p in diffed_paths))
         candidates = [p for p in by_dir[main_dir] if p in diffed_paths]
@@ -224,8 +235,8 @@ async def l10n_review_pass(
             template = cand
     family: dict[str, ArbFile] = {}
     if template is not None:
-        tdir = template.path.rsplit("/", 1)[0]
-        family = {p: a for p, a in parsed.items() if a.parsed_ok and p.rsplit("/", 1)[0] == tdir}
+        tdir = _parent_dir(template.path)
+        family = {p: a for p, a in parsed.items() if a.parsed_ok and _parent_dir(p) == tdir}
         # Heuristic pick only: a diffed file with more entries than the guess
         # means the guess was wrong — trust the data instead. An explicit
         # l10n.yaml pick is authoritative and never overruled.
@@ -236,7 +247,7 @@ async def l10n_review_pass(
                 family = {
                     p: a
                     for p, a in parsed.items()
-                    if a.parsed_ok and p.rsplit("/", 1)[0] == template.path.rsplit("/", 1)[0]
+                    if a.parsed_ok and _parent_dir(p) == _parent_dir(template.path)
                 }
 
     # ── Deterministic checks (no quota) ─────────────────────────────────
