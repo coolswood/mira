@@ -188,6 +188,9 @@ def list_activity(limit: int = 200, repo: str = "", q: str = "") -> ActivityResp
                             repo=repo_record.repo,
                             author_username=e.author,
                             author_avatar_url=e.author_avatar_url,
+                            model=e.model,
+                            kind=e.kind,
+                            head_sha=e.head_sha,
                         )
                     )
             finally:

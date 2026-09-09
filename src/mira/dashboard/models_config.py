@@ -7,12 +7,27 @@ model there; this file picks it up automatically.
 
 from __future__ import annotations
 
+import json
 import logging
 
-from mira.config import LLMConfig
+from mira.config import CompareModelConfig, LLMConfig
 from mira.llm import registry
 
 logger = logging.getLogger(__name__)
+
+# Settings-table key holding the dashboard's parallel-comparison model list as
+# a JSON array of {provider, model, reasoning_effort}. Blank/unset falls back
+# to the `llm.compare_models` mira.yaml list (same ""-means-inherit convention
+# as the flat model keys).
+COMPARE_MODELS_KEY = "compare_models"
+
+# Hard cap on parallel comparison models — each entry reviews every PR, so the
+# cap is the quota shock absorber.
+MAX_COMPARE_MODELS = 3
+
+# Catalog backends a compare entry may pin; "" keeps the deployment's active
+# provider. The values double as `create_llm` provider strings.
+COMPARE_PROVIDER_VALUES = {"", "codex-cli", "antigravity-cli", "bedrock", "openai"}
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     model_id: registry.pricing(model_id) for model_id in registry.all_models()
@@ -211,6 +226,107 @@ def get_security_thinking_mode(
     if not resolved or resolved == "off":
         return None
     return resolved
+
+
+def _normalize_compare_entry(raw: object) -> dict | None:
+    """Coerce one raw compare entry (DB blob item or mira.yaml dict) to a
+    canonical {provider, model, reasoning_effort} dict, or None if unusable."""
+    if not isinstance(raw, dict):
+        return None
+    model = str(raw.get("model") or "").strip()
+    if not model:
+        return None
+    provider = str(raw.get("provider") or "").strip()
+    if provider not in COMPARE_PROVIDER_VALUES:
+        return None
+    effort = raw.get("reasoning_effort")
+    if effort in (None, "", "off"):
+        effort = None
+    else:
+        effort = str(effort)
+    return {"provider": provider, "model": model, "reasoning_effort": effort}
+
+
+def get_compare_models(config: LLMConfig) -> list[CompareModelConfig]:
+    """Resolve the parallel-comparison model list: DB blob → mira.yaml list.
+
+    A blank/absent DB value falls back to ``config.compare_models`` (the
+    ""-means-inherit convention); a saved non-empty blob shadows it. Entries
+    are capped at MAX_COMPARE_MODELS and unusable rows are dropped silently —
+    the dashboard validates on save, so runtime garbage means a hand-edited
+    blob, and a shadow run must never crash a real review because of it.
+    """
+    try:
+        from mira.dashboard.api import _app_db
+
+        if _app_db is not None:
+            raw = _app_db.get_setting(COMPARE_MODELS_KEY)
+            if raw:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    entries = [
+                        e for e in (_normalize_compare_entry(item) for item in parsed) if e
+                    ]
+                    return [
+                        CompareModelConfig(**e) for e in entries[:MAX_COMPARE_MODELS]
+                    ]
+    except Exception:
+        pass  # DB not available / bad blob — resolve from config alone
+    return list(config.compare_models)[:MAX_COMPARE_MODELS]
+
+
+def llm_config_for_compare(entry: CompareModelConfig, base: LLMConfig) -> LLMConfig:
+    """LLMConfig for one comparison shadow run: entry's provider/model/effort
+    applied over the deployment base. All transport settings (endpoints,
+    CLI homes, timeouts) come from the base config — a compare entry only
+    picks the model."""
+    update: dict = {"model": entry.model, "reasoning_effort": entry.reasoning_effort}
+    if entry.provider:
+        update["provider"] = entry.provider
+    return base.model_copy(update=update)
+
+
+def validate_compare_entries(
+    entries: list[dict], active_backend_name: str
+) -> list[dict]:
+    """Validate and normalize dashboard-submitted compare entries.
+
+    Returns canonical dicts ({provider, model, reasoning_effort}) fit for
+    JSON persistence; raises ValueError with a user-readable message.
+    Mirrors the flat model keys: ids are free-form (registry fallback covers
+    pricing/limits), but the list itself has hard rules — non-empty models,
+    no duplicates, provider from the allowed set, effort the backend honors.
+    """
+    if len(entries) > MAX_COMPARE_MODELS:
+        raise ValueError(
+            f"At most {MAX_COMPARE_MODELS} comparison models are allowed "
+            f"(got {len(entries)}) — each one reviews every PR."
+        )
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+    for raw in entries:
+        entry = _normalize_compare_entry(raw)
+        if entry is None:
+            raise ValueError(
+                "Each comparison model needs a non-empty model id and a known "
+                f"provider (got provider={raw.get('provider')!r}, "
+                f"model={raw.get('model')!r})."
+            )
+        key = (entry["provider"], entry["model"])
+        if key in seen:
+            raise ValueError(f"Duplicate comparison model: {entry['model']!r}.")
+        seen.add(key)
+        effort = entry["reasoning_effort"]
+        if effort is not None:
+            backend = entry["provider"] or active_backend_name
+            allowed = set(_BACKEND_EFFORT_LEVELS.get(backend, THINKING_MODE_VALUES))
+            if effort not in allowed:
+                raise ValueError(
+                    f"Effort {effort!r} is not supported by {backend} "
+                    f"(comparison model {entry['model']!r})."
+                )
+        out.append(entry)
+    return out
 
 
 def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
