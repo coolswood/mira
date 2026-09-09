@@ -161,7 +161,9 @@ def list_activity(limit: int = 200, repo: str = "", q: str = "") -> ActivityResp
             try:
                 for e in store.list_review_events(limit=500):
                     if terms:
-                        haystack = f"{e.pr_title} #{e.pr_number} {slug} {e.categories}".lower()
+                        haystack = (
+                            f"{e.pr_title} #{e.pr_number} {slug} {e.categories} {e.error}".lower()
+                        )
                         if not all(t in haystack for t in terms):
                             continue
                     events.append(
@@ -180,6 +182,8 @@ def list_activity(limit: int = 200, repo: str = "", q: str = "") -> ActivityResp
                             duration_ms=e.duration_ms,
                             categories=e.categories,
                             created_at=e.created_at,
+                            status=e.status,
+                            error=e.error,
                             owner=repo_record.owner,
                             repo=repo_record.repo,
                             author_username=e.author,
@@ -280,6 +284,10 @@ def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
                 repo_record.owner, repo_record.repo, platform=repo_record.platform
             )
             for e in store.list_review_events(limit=500):
+                # Failed passes posted no comments — counting them as reviews
+                # would draw phantom spikes in the charts after an outage.
+                if e.status == "failed":
+                    continue
                 all_events.append(
                     {
                         "created_at": e.created_at,

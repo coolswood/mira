@@ -1,5 +1,6 @@
 import {
   Activity as ActivityIcon,
+  AlertTriangle,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -113,6 +114,8 @@ type PRGroup = {
   totalSuggestions: number
   totalTokens: number
   totalDurationMs: number
+  failedCount: number // passes whose pipeline crashed
+  lastError: string // error summary of the most recent failed pass
 }
 
 function groupByPR(events: ActivityEventModel[]): PRGroup[] {
@@ -137,6 +140,8 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
     let totalSuggestions = 0
     let totalTokens = 0
     let totalDurationMs = 0
+    let failedCount = 0
+    let lastError = ""
     for (const r of reviews) {
       splitCategories(r.categories).forEach((c) => cats.add(c))
       totalComments += r.comments_posted
@@ -145,6 +150,11 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
       totalSuggestions += r.suggestions
       totalTokens += r.tokens_used
       totalDurationMs += r.duration_ms
+      if (r.status === "failed") {
+        failedCount++
+        // reviews are newest first, so the first hit is the latest failure.
+        if (!lastError) lastError = r.error
+      }
     }
     groups.push({
       key,
@@ -167,6 +177,8 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
       totalSuggestions,
       totalTokens,
       totalDurationMs,
+      failedCount,
+      lastError,
     })
   }
   return groups
@@ -672,6 +684,20 @@ export function ActivityPage() {
                           <span className="truncate text-muted-foreground">
                             {g.pr_title}
                           </span>
+                          {/* Failed passes surfaced so silent review crashes
+                              are visible without digging through logs. */}
+                          {g.failedCount > 0 && (
+                            <Badge
+                              className={cn(
+                                "shrink-0",
+                                PILL_RING,
+                                SEVERITY_PILL.blocker,
+                              )}
+                              title={g.lastError || "Review failed"}
+                            >
+                              {g.failedCount} failed
+                            </Badge>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell className="tabular-nums">
@@ -966,7 +992,12 @@ function ConversationTimeline({ detail }: { detail: ActivityDetailModel }) {
         return (
           <li key={t.review.id} className="flex gap-3">
             <div className="flex flex-col items-center">
-              <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-primary ring-4 ring-background" />
+              <span
+                className={cn(
+                  "mt-1 h-2.5 w-2.5 shrink-0 rounded-full ring-4 ring-background",
+                  t.review.status === "failed" ? "bg-destructive" : "bg-primary",
+                )}
+              />
               {!last && <span className="w-px grow bg-border" />}
             </div>
             <div className={cn("flex-1", last ? "pb-1" : "pb-8")}>
@@ -993,14 +1024,21 @@ function ReviewEntry({
   review: ActivityReviewModel
   repliesByComment?: RepliesByComment
 }) {
+  const failed = review.status === "failed"
   return (
     <>
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <MiraMark />
-          <span className="truncate text-sm font-medium">
-            Mira reviewed {plural(review.files_reviewed, "file")}
-          </span>
+          {failed ? (
+            <span className="truncate text-sm font-medium text-destructive">
+              Review failed
+            </span>
+          ) : (
+            <span className="truncate text-sm font-medium">
+              Mira reviewed {plural(review.files_reviewed, "file")}
+            </span>
+          )}
         </div>
         <span
           className="shrink-0 text-xs text-muted-foreground"
@@ -1010,75 +1048,87 @@ function ReviewEntry({
         </span>
       </div>
 
-      <div className="mt-2">
-        <SeverityBadges counts={review} />
-      </div>
-
-      {review.comments.length > 0 && (
-        <ul className="mt-3 space-y-3">
-          {review.comments.map((c) => (
-            <li key={c.id} className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    "h-1.5 w-1.5 shrink-0 rounded-full",
-                    SEV_DOT[c.severity?.toLowerCase()] ?? "bg-muted-foreground",
-                  )}
-                />
-                <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
-                  {c.path}
-                  {c.line ? `:${c.line}` : ""}
-                </span>
-              </div>
-              {c.title && (
-                <div className="mt-0.5 pl-[0.875rem] text-xs font-medium">{c.title}</div>
-              )}
-              {c.body && (
-                <div className="mt-0.5 pl-[0.875rem] whitespace-pre-wrap text-xs text-muted-foreground">
-                  {c.body}
-                </div>
-              )}
-              {/* Human replies threaded under this exact comment. */}
-              {(() => {
-                const reps = c.github_comment_id
-                  ? repliesByComment?.get(c.github_comment_id)
-                  : undefined
-                if (!reps || reps.length === 0) return null
-                return (
-                  <div className="mt-2 space-y-2 pl-[0.875rem]">
-                    {reps.map((r) => (
-                      <ReplyEntry key={r.id} reply={r} />
-                    ))}
-                  </div>
-                )
-              })()}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {review.reviewed_paths.length > 0 && (
-        <details className="mt-2">
-          <summary className="cursor-pointer text-xs text-muted-foreground">
-            {plural(review.reviewed_paths.length, "file")} reviewed
-          </summary>
-          <div className="mt-1 flex flex-wrap gap-1">
-            {review.reviewed_paths.map((p) => (
-              <span
-                key={p}
-                className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-              >
-                {p}
-              </span>
-            ))}
+      {failed ? (
+        <div className="mt-2 flex items-start gap-2 rounded-lg bg-destructive/10 p-2.5">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+          <p className="min-w-0 whitespace-pre-wrap break-words text-xs text-destructive">
+            {review.error || "The review pipeline crashed — see server logs for details."}
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="mt-2">
+            <SeverityBadges counts={review} />
           </div>
-        </details>
-      )}
 
-      <div className="mt-2 text-xs text-muted-foreground">
-        {plural(review.comments_posted, "comment")} · {review.lines_changed.toLocaleString()} lines ·{" "}
-        {review.tokens_used.toLocaleString()} tokens · {(review.duration_ms / 1000).toFixed(1)}s
-      </div>
+          {review.comments.length > 0 && (
+            <ul className="mt-3 space-y-3">
+              {review.comments.map((c) => (
+                <li key={c.id} className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={cn(
+                        "h-1.5 w-1.5 shrink-0 rounded-full",
+                        SEV_DOT[c.severity?.toLowerCase()] ?? "bg-muted-foreground",
+                      )}
+                    />
+                    <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
+                      {c.path}
+                      {c.line ? `:${c.line}` : ""}
+                    </span>
+                  </div>
+                  {c.title && (
+                    <div className="mt-0.5 pl-[0.875rem] text-xs font-medium">{c.title}</div>
+                  )}
+                  {c.body && (
+                    <div className="mt-0.5 pl-[0.875rem] whitespace-pre-wrap text-xs text-muted-foreground">
+                      {c.body}
+                    </div>
+                  )}
+                  {/* Human replies threaded under this exact comment. */}
+                  {(() => {
+                    const reps = c.github_comment_id
+                      ? repliesByComment?.get(c.github_comment_id)
+                      : undefined
+                    if (!reps || reps.length === 0) return null
+                    return (
+                      <div className="mt-2 space-y-2 pl-[0.875rem]">
+                        {reps.map((r) => (
+                          <ReplyEntry key={r.id} reply={r} />
+                        ))}
+                      </div>
+                    )
+                  })()}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {review.reviewed_paths.length > 0 && (
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs text-muted-foreground">
+                {plural(review.reviewed_paths.length, "file")} reviewed
+              </summary>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {review.reviewed_paths.map((p) => (
+                  <span
+                    key={p}
+                    className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                  >
+                    {p}
+                  </span>
+                ))}
+              </div>
+            </details>
+          )}
+
+          <div className="mt-2 text-xs text-muted-foreground">
+            {plural(review.comments_posted, "comment")} ·{" "}
+            {review.lines_changed.toLocaleString()} lines ·{" "}
+            {review.tokens_used.toLocaleString()} tokens · {(review.duration_ms / 1000).toFixed(1)}s
+          </div>
+        </>
+      )}
     </>
   )
 }

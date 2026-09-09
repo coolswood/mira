@@ -165,6 +165,10 @@ export interface ReviewEventModel {
   duration_ms: number
   categories: string
   created_at: number
+  // "completed" for a finished pass; "failed" marks a pass whose pipeline
+  // crashed — `error` then carries a safe summary of what went wrong.
+  status: string
+  error: string
 }
 
 export interface ActivityEventModel extends ReviewEventModel {

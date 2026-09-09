@@ -201,6 +201,11 @@ class ReviewEventModel(BaseModel):
     duration_ms: int
     categories: str
     created_at: float
+    # "completed" for a finished pass; "failed" marks a pass whose pipeline
+    # crashed — `error` then carries a safe, secret-free summary so the
+    # Activities feed can surface silent review failures.
+    status: str = "completed"
+    error: str = ""
 
 
 class ActivityEventModel(ReviewEventModel):
@@ -1398,6 +1403,8 @@ def get_activity_detail(owner: str, repo: str, pr_number: int) -> ActivityDetail
                 duration_ms=e.duration_ms,
                 categories=e.categories,
                 created_at=e.created_at,
+                status=e.status,
+                error=e.error,
                 reviewed_paths=_paths(e.reviewed_paths),
                 comments=comments_by_review.get(e.id, []),
             )

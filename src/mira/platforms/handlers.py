@@ -106,6 +106,59 @@ def _fail_progress(progress_key: str | None, exc: BaseException) -> None:
         pass
 
 
+def _safe_error_summary(exc: BaseException, limit: int = 300) -> str:
+    """Secret-free one-line summary of a review failure, safe to persist.
+
+    LLMError already carries a sanitized safe_message (no model names, no
+    underlying errors, no auth material) — prefer it. For anything else fall
+    back to the exception class name plus its message, collapsed to one line
+    and truncated; raw tracebacks and internals stay in the server logs.
+    """
+    from mira.exceptions import LLMError
+
+    if isinstance(exc, LLMError):
+        summary = f"{exc.code}: {exc.safe_message}"
+    else:
+        summary = f"{type(exc).__name__}: {exc}"
+    return " ".join(summary.split())[:limit]
+
+
+def _record_review_failure(
+    owner: str,
+    repo: str,
+    number: int,
+    pr_url: str,
+    pr_title: str,
+    platform: str,
+    exc: BaseException,
+) -> None:
+    """Persist a failed review pass so it appears in the dashboard Activities
+    feed. Without this row a pipeline crash (LLM/provider error, etc.) was
+    only visible as a log traceback plus an ephemeral in-memory progress
+    failure — nothing the user could see after the fact.
+
+    Best-effort: recording must never mask the original error.
+    """
+    try:
+        store = _open_store(owner, repo, platform)
+        try:
+            store.record_review_failure(
+                pr_number=number,
+                pr_title=pr_title,
+                pr_url=pr_url,
+                error=_safe_error_summary(exc),
+            )
+        finally:
+            store.close()
+    except Exception as record_exc:
+        logger.warning(
+            "Failed to record review-failure event for %s #%d: %s",
+            f"{owner}/{repo}",
+            number,
+            record_exc,
+        )
+
+
 def _help_message(bot_name: str) -> str:
     """Markdown help comment listing every command Mira understands."""
     return (
@@ -191,6 +244,7 @@ async def run_pr_review(
     except Exception as exc:
         review_tracker.fail(repo_full, number, str(exc))
         _fail_progress(progress_key, exc)
+        _record_review_failure(owner, repo, number, pr_url, pr_title, platform, exc)
         raise
     _finish_progress(progress_key)
 
@@ -293,6 +347,7 @@ async def run_pr_command(
         except Exception as exc:
             review_tracker.fail(repo_full, number, str(exc))
             _fail_progress(progress_key, exc)
+            _record_review_failure(owner, repo, number, pr_url, pr_title, platform, exc)
             raise
         _finish_progress(progress_key)
     elif is_review:
@@ -317,6 +372,7 @@ async def run_pr_command(
         except Exception as exc:
             review_tracker.fail(repo_full, number, str(exc))
             _fail_progress(progress_key, exc)
+            _record_review_failure(owner, repo, number, pr_url, pr_title, platform, exc)
             raise
         _finish_progress(progress_key)
     else:
