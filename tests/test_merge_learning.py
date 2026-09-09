@@ -330,7 +330,10 @@ def test_webhook_routes_merged_pr(monkeypatch):
         },
     )
     assert resp.status_code == 200
-    assert resp.json() == {"status": "processing"}
+    # ack-first: the response no longer mirrors dispatch routing ("processing"
+    # moved to the background task); the called_with check below is the real
+    # assertion.
+    assert resp.json() == {"status": "accepted"}
     assert called_with["bot_name"] == "mira"
 
 
@@ -382,7 +385,9 @@ def test_webhook_ignores_closed_but_not_merged(monkeypatch):
         },
     )
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ignored"}
+    # ack-first: routing decisions are invisible at the HTTP layer now; the
+    # "handler never ran" check below is the real assertion.
+    assert resp.json() == {"status": "accepted"}
     assert called == []
 
 
