@@ -549,8 +549,13 @@ class TestReviewEngine:
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
         # 1. One placeholder post.
-        mock_provider.post_comment.assert_called_once()
-        placeholder_body = mock_provider.post_comment.call_args[0][1]
+        walkthrough_posts = [
+            c
+            for c in mock_provider.post_comment.await_args_list
+            if WALKTHROUGH_MARKER in c.args[1]
+        ]
+        assert len(walkthrough_posts) == 1
+        placeholder_body = walkthrough_posts[0].args[1]
         assert "Reviewing this PR" in placeholder_body
         assert "<!-- mira-walkthrough -->" in placeholder_body
 
@@ -588,7 +593,10 @@ class TestReviewEngine:
         assert mock_provider.update_comment.call_count >= 2
         for call in mock_provider.update_comment.call_args_list:
             assert call[0][1] == 42
-        mock_provider.post_comment.assert_not_called()
+        # The walkthrough never creates a new comment; post_comment is only
+        # used by one-shot chatter (review-start message).
+        for call in mock_provider.post_comment.await_args_list:
+            assert WALKTHROUGH_MARKER not in call.args[1]
 
     @pytest.mark.asyncio
     async def test_walkthrough_creates_when_no_existing(
@@ -603,8 +611,14 @@ class TestReviewEngine:
         engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
-        # Exactly one new comment (the placeholder); rest are updates.
-        mock_provider.post_comment.assert_called_once()
+        # Exactly one walkthrough comment is created (the placeholder); any
+        # other post_comment is one-shot chatter, not a new walkthrough.
+        walkthrough_posts = [
+            c
+            for c in mock_provider.post_comment.await_args_list
+            if WALKTHROUGH_MARKER in c.args[1]
+        ]
+        assert len(walkthrough_posts) == 1
         assert mock_provider.update_comment.call_count >= 1
 
     @pytest.mark.asyncio
@@ -2597,3 +2611,113 @@ class TestAgenticSecurityPass(TestAgenticToolsOnIndexedRepos):
         main_llm.complete_with_tools.assert_called_once()
         assert len(out) == 1
         assert out[0].source_pass == "security"
+
+
+class TestChatUpdates:
+    """Playful start/all-clear PR comments (review.chat_updates)."""
+
+    @staticmethod
+    def _comment_bodies(mock_provider: AsyncMock) -> list[str]:
+        return [call.args[1] for call in mock_provider.post_comment.await_args_list]
+
+    @pytest.mark.asyncio
+    async def test_clean_review_posts_start_and_all_clear(
+        self, mock_provider: AsyncMock
+    ):
+        from mira.core.chatter import REVIEW_CLEAN_MESSAGES, REVIEW_START_MESSAGES
+
+        llm = MagicMock(spec=LLMProvider)
+        no_comments = json.dumps(
+            {"comments": [], "summary": "All good!", "metadata": {"reviewed_files": 1}}
+        )
+        llm.review = AsyncMock(return_value=no_comments)
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+        llm.complete = AsyncMock(return_value=no_comments)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        bodies = self._comment_bodies(mock_provider)
+        assert any(b in REVIEW_START_MESSAGES for b in bodies)
+        assert any(b in REVIEW_CLEAN_MESSAGES for b in bodies)
+        mock_provider.post_review.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_findings_post_start_but_no_all_clear(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        from mira.core.chatter import REVIEW_CLEAN_MESSAGES, REVIEW_START_MESSAGES
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.post_review.assert_called_once()
+        bodies = self._comment_bodies(mock_provider)
+        assert any(b in REVIEW_START_MESSAGES for b in bodies)
+        assert not any(b in REVIEW_CLEAN_MESSAGES for b in bodies)
+
+    @pytest.mark.asyncio
+    async def test_dry_run_posts_no_chatter(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        engine = ReviewEngine(
+            config=MiraConfig(), llm=mock_llm, provider=mock_provider, dry_run=True
+        )
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.post_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_chatter_disabled_via_config(
+        self, mock_provider: AsyncMock
+    ):
+        from mira.config import ReviewConfig
+
+        from mira.core.chatter import REVIEW_CLEAN_MESSAGES, REVIEW_START_MESSAGES
+
+        llm = MagicMock(spec=LLMProvider)
+        no_comments = json.dumps(
+            {"comments": [], "summary": "All good!", "metadata": {"reviewed_files": 1}}
+        )
+        llm.review = AsyncMock(return_value=no_comments)
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+        llm.complete = AsyncMock(return_value=no_comments)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        engine = ReviewEngine(
+            config=MiraConfig(review=ReviewConfig(chat_updates=False)),
+            llm=llm,
+            provider=mock_provider,
+        )
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        bodies = self._comment_bodies(mock_provider)
+        assert not any(b in REVIEW_START_MESSAGES for b in bodies)
+        assert not any(b in REVIEW_CLEAN_MESSAGES for b in bodies)
+
+    @pytest.mark.asyncio
+    async def test_empty_diff_posts_no_chatter(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        from mira.core.chatter import REVIEW_CLEAN_MESSAGES, REVIEW_START_MESSAGES
+
+        mock_provider.get_pr_diff.return_value = ""
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        bodies = self._comment_bodies(mock_provider)
+        assert not any(b in REVIEW_START_MESSAGES for b in bodies)
+        assert not any(b in REVIEW_CLEAN_MESSAGES for b in bodies)
+
+
+def test_chatter_pools_are_sane() -> None:
+    from mira.core import chatter
+
+    for pool in (chatter.REVIEW_START_MESSAGES, chatter.REVIEW_CLEAN_MESSAGES):
+        assert len(pool) >= 5
+        assert all(isinstance(m, str) and m.strip() for m in pool)
+    assert chatter.review_started_message() in chatter.REVIEW_START_MESSAGES
+    assert chatter.review_clean_message() in chatter.REVIEW_CLEAN_MESSAGES
