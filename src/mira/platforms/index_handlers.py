@@ -50,38 +50,50 @@ async def run_incremental_index(
     except Exception:
         pass
     llm.progress_key = progress_key  # type: ignore[attr-defined]
-    store = IndexStore.open(owner, repo, platform=platform)
+    try:
+        store = IndexStore.open(owner, repo, platform=platform)
 
-    total_affected = len(changed_paths) + len(removed_paths)
-    if total_affected > _INCREMENTAL_FILE_CAP:
-        logger.info(
-            "Push to %s/%s touched %d files (cap=%d), running full re-index",
-            owner,
-            repo,
-            total_affected,
-            _INCREMENTAL_FILE_CAP,
-        )
-        count = await index_repo(
-            owner=owner,
-            repo=repo,
-            config=config,
-            store=store,
-            llm=llm,
-            branch=default_branch,
-            fetcher=fetcher,
-        )
-    else:
-        count = await index_diff(
-            owner=owner,
-            repo=repo,
-            config=config,
-            store=store,
-            llm=llm,
-            changed_paths=changed_paths,
-            removed_paths=removed_paths,
-            branch=default_branch,
-            fetcher=fetcher,
-        )
+        total_affected = len(changed_paths) + len(removed_paths)
+        if total_affected > _INCREMENTAL_FILE_CAP:
+            logger.info(
+                "Push to %s/%s touched %d files (cap=%d), running full re-index",
+                owner,
+                repo,
+                total_affected,
+                _INCREMENTAL_FILE_CAP,
+            )
+            count = await index_repo(
+                owner=owner,
+                repo=repo,
+                config=config,
+                store=store,
+                llm=llm,
+                branch=default_branch,
+                fetcher=fetcher,
+            )
+        else:
+            count = await index_diff(
+                owner=owner,
+                repo=repo,
+                config=config,
+                store=store,
+                llm=llm,
+                changed_paths=changed_paths,
+                removed_paths=removed_paths,
+                branch=default_branch,
+                fetcher=fetcher,
+            )
+    except Exception as exc:
+        # Running jobs are never TTL-evicted — an unfailed job would show as
+        # stuck on the dashboard forever. Fail it, then re-raise.
+        if progress_key:
+            try:
+                from mira.core.progress import tracker
+
+                tracker.fail(progress_key, str(exc)[:500])
+            except Exception:
+                pass
+        raise
     if progress_key:
         try:
             from mira.core.progress import tracker

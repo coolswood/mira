@@ -71,8 +71,8 @@ def get_progress(active_only: bool = False) -> list[JobProgressModel]:
     """
     from mira.core.progress import tracker
 
-    jobs = tracker.get_active() if active_only else tracker.get_all()
-    return [JobProgressModel(**j.as_dict()) for j in jobs]
+    jobs = tracker.snapshot_active() if active_only else tracker.snapshot_all()
+    return [JobProgressModel(**j) for j in jobs]
 
 
 @router.get("/api/indexing/estimate", response_model=CostEstimate)

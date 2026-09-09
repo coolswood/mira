@@ -238,6 +238,15 @@ async def run_pr_review(
     is_indexed = bool(repo_record and repo_record.status == "ready")
 
     logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
+
+    # Register only after the fallible setup above: a config/LLM/DB failure
+    # here must not leave a forever-"running" job (running entries are never
+    # TTL-evicted). Everything after this point is guarded below.
+    progress_key = _begin_progress(repo_full, number, pr_title, pr_url)
+    # Not `provider` — that name is the platform provider parameter, and
+    # shadowing it here would hand the engine an LLM provider instead.
+    for llm_tier in (llm, indexing_llm, security_llm):
+        llm_tier.progress_key = progress_key  # type: ignore[attr-defined]
     try:
         result = await engine.review_pr(pr_url)
         review_tracker.complete(repo_full, number)

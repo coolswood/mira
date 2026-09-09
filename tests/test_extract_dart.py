@@ -122,3 +122,45 @@ def test_find_symbol_by_qualified_name():
     assert span is not None
     assert span.name == "_handleTap"
     assert find_symbol_by_name(FLUTTER_STYLE, "dart", "build") is not None
+
+
+NAMED_CTORS_AND_GETTERS = """\
+class MoodChart {
+  final List<int> entries;
+
+  factory MoodChart.fromJson(Map<String, dynamic> json) {
+    return MoodChart(entries: json['entries']);
+  }
+
+  factory MoodChart.demo() => MoodChart(entries: []);
+
+  MoodChart(this.entries);
+
+  bool get ready {
+    if (entries.isEmpty) {
+      return false;
+    }
+    return true;
+  }
+}
+"""
+
+
+def test_dart_named_constructors_keep_their_name():
+    symbols = extract_symbols(NAMED_CTORS_AND_GETTERS, "dart")
+    by_qual = {s.qualified_name: s for s in symbols if s.qualified_name}
+    assert by_qual["MoodChart.fromJson"].name == "fromJson"
+    assert by_qual["MoodChart.demo"].name == "demo"
+    # unnamed constructor is preserved as Class.Class
+    assert by_qual["MoodChart.MoodChart"].name == "MoodChart"
+    assert find_symbol_by_name(NAMED_CTORS_AND_GETTERS, "dart", "MoodChart.fromJson") is not None
+
+
+def test_dart_block_bodied_getter_is_extracted_not_scanned():
+    symbols = extract_symbols(NAMED_CTORS_AND_GETTERS, "dart")
+    by_qual = {s.qualified_name: s for s in symbols if s.qualified_name}
+    assert by_qual["MoodChart.ready"].kind == "method"
+    # the getter body must not leak control flow as symbols
+    names = {s.name for s in symbols}
+    assert "if" not in names
+    assert "return" not in names
