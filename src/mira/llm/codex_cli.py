@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 # stronger levels clamp to "high" (the widest codex-wide value).
 _EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
 
+# One exec --json line can embed an entire model response (``item.completed``
+# with an agent_message), which can exceed asyncio's default 64 KiB
+# stream-reader limit and abort a valid review — open the subprocess pipes
+# with headroom.
+_STREAM_LIMIT = 10 * 1024 * 1024
+
 
 def _parse_exec_event(raw: bytes | str) -> dict | None:
     """Parse one ``codex exec --json`` JSONL line into an event dict.
@@ -201,6 +207,7 @@ class CodexCLIProvider:
                     env=self._env(runtime_home, runtime_codex_home),
                     cwd=runtime_home,
                     start_new_session=os.name == "posix",
+                    limit=_STREAM_LIMIT,
                 )
             except FileNotFoundError as exc:
                 raise LLMError(
