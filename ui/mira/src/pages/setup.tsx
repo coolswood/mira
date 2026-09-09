@@ -44,6 +44,8 @@ export function SetupPage() {
     setSaving(true)
     // Efforts and API protocol stay at their defaults ("off"/"chat", stored
     // as "") — the wizard only picks models; everything else is inherited.
+    // The compare list stays empty too ("" = inherit mira.yaml): it's a
+    // power-user setting managed from the Models settings page.
     await api.saveModels({
       indexing_model: indexingModel,
       review_model: reviewModel,
@@ -52,6 +54,7 @@ export function SetupPage() {
       review_thinking_mode: "off",
       security_thinking_mode: "off",
       api_style: "chat",
+      compare_models: [],
     })
     navigate("/")
   }

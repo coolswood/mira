@@ -85,16 +85,21 @@ function JobRow({
             rel="noreferrer"
             className="truncate text-sm font-medium hover:underline"
           >
-            {job.kind === "review" ? (
+            {job.kind === "indexing" ? (
+              <>Indexing {job.repo}</>
+            ) : (
               <>
+                {job.kind === "compare" && (
+                  <span className="mr-1 rounded bg-muted px-1 py-0.5 font-mono text-[11px] font-normal">
+                    {job.key.split(":cmp:").pop()}
+                  </span>
+                )}
                 #{job.pr_number} {job.pr_title || job.repo}
               </>
-            ) : (
-              <>Indexing {job.repo}</>
             )}
           </a>
           <div className="text-xs text-muted-foreground">
-            {job.kind === "review" && `${job.repo} · `}
+            {job.kind !== "indexing" && `${job.repo} · `}
             {stageLabel(job.stage)}
             {job.review_round > 1 ? ` (round ${job.review_round})` : ""}
             {job.calls_in_flight > 0

@@ -7,11 +7,13 @@ import {
   ChevronsUpDown,
   ChevronUp,
   ExternalLink,
+  GitCompare,
   RefreshCw,
   Search,
   X,
 } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
+import { Link } from "react-router"
 import { Area, AreaChart, CartesianGrid, XAxis } from "recharts"
 
 import { Badge } from "@/components/ui/badge"
@@ -815,6 +817,14 @@ export function ActivityPage() {
                   >
                     <ExternalLink className="h-4 w-4" />
                   </a>
+                  <Link
+                    to={`/activity/${selected.owner}/${selected.repo}/${selected.pr_number}/compare`}
+                    aria-label="Compare review models"
+                    title="Compare review models"
+                    className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <GitCompare className="h-4 w-4" />
+                  </Link>
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <AuthorAvatar
@@ -1037,6 +1047,19 @@ function ReviewEntry({
           ) : (
             <span className="truncate text-sm font-medium">
               Mira reviewed {plural(review.files_reviewed, "file")}
+            </span>
+          )}
+          {review.kind === "compare" && (
+            <Badge variant="secondary" className="shrink-0 text-[10px]">
+              Compare
+            </Badge>
+          )}
+          {review.model && (
+            <span
+              className="hidden max-w-[10rem] truncate font-mono text-[11px] text-muted-foreground sm:inline"
+              title={review.model}
+            >
+              {review.model}
             </span>
           )}
         </div>

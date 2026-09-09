@@ -13,7 +13,7 @@ export interface JobProgressEvent {
 
 export interface JobProgress {
   key: string
-  kind: "review" | "indexing"
+  kind: "review" | "indexing" | "compare"
   repo: string
   pr_number: number
   pr_title: string
