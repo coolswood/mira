@@ -156,6 +156,15 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         full="Antigravity CLI response did not contain a JSON object: {excerpt}",
         safe="Antigravity CLI response did not contain a JSON object",
     ),
+    # Live model-catalog fetch (`agy models`, used by the dashboard dropdown).
+    "antigravity_models_failed": ErrorMessage(
+        full="Antigravity CLI model listing failed: {detail}",
+        safe="Antigravity CLI model listing failed",
+    ),
+    "antigravity_models_empty": ErrorMessage(
+        full="Antigravity CLI model listing returned no models",
+        safe="Antigravity CLI model listing returned no models",
+    ),
 }
 
 

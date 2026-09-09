@@ -26,6 +26,7 @@ import os
 import shlex
 import shutil
 import signal
+import subprocess
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -78,6 +79,95 @@ _MODEL_SENTINELS = {"", "default", "antigravity-default", "agy-default"}
 _EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
 
 
+def _prepare_gemini_home(config: LLMConfig, runtime_home: str) -> None:
+    """Populate an ephemeral HOME's ``.gemini`` directory for one CLI run.
+
+    With ``antigravity_home`` configured, its contents are trusted operator
+    state (settings.json, cached login credentials) and are copied verbatim.
+    With API-key auth, a minimal settings.json selecting the Gemini provider
+    is written unless the copied home already has one. Shared by the review
+    call path and :func:`list_models` so both always see the same auth state.
+    """
+    gemini_dir = Path(runtime_home) / ".gemini"
+    gemini_dir.mkdir(parents=True, mode=0o700)
+    source_home = config.antigravity_home
+    if source_home:
+        source = Path(source_home).expanduser()
+        if not source.is_dir():
+            raise LLMError("antigravity_home_missing", path=str(source))
+        shutil.copytree(source, gemini_dir, dirs_exist_ok=True)
+    api_key = config.antigravity_api_key or os.environ.get("GEMINI_API_KEY", "")
+    if api_key:
+        settings_dir = gemini_dir / "antigravity-cli"
+        settings_dir.mkdir(exist_ok=True)
+        settings = settings_dir / "settings.json"
+        if not settings.exists():
+            settings.write_text(json.dumps({"modelProvider": "gemini"}))
+            settings.chmod(0o600)
+
+
+def _child_env(config: LLMConfig, runtime_home: str) -> dict[str, str]:
+    """Build a minimal child environment without Mira service credentials."""
+    env = {key: value for key, value in os.environ.items() if key in _SAFE_ENV_KEYS}
+    env["HOME"] = runtime_home
+    api_key = config.antigravity_api_key or os.environ.get("GEMINI_API_KEY", "")
+    if api_key:
+        env["GEMINI_API_KEY"] = api_key
+    return env
+
+
+def list_models(config: LLMConfig, timeout: float = 30.0) -> list[dict]:
+    """Return the CLI's available models as ``[{"value", "label"}]``.
+
+    Runs ``agy models`` in an ephemeral HOME prepared exactly like a real
+    call (see :func:`_prepare_gemini_home`), so the list reflects the
+    account/subscription that reviews actually run against. Raises on any
+    failure — the dashboard model catalog treats that as "no live catalog"
+    and falls back to the bundled registry entries.
+    """
+    agy_command = config.antigravity_command or "agy"
+    if any(char in agy_command for char in (" ", "\t", "\n", ";", "|", "&")):
+        raise ValueError(
+            f"Invalid antigravity_command: {agy_command!r}. "
+            "Set it to a single executable path/name without arguments."
+        )
+    with tempfile.TemporaryDirectory(prefix="mira-antigravity-catalog-") as tmpdir:
+        runtime_home = str(Path(tmpdir) / "runtime")
+        Path(runtime_home).mkdir(mode=0o700)
+        _prepare_gemini_home(config, runtime_home)
+        try:
+            proc = subprocess.run(
+                [agy_command, "models"],
+                env=_child_env(config, runtime_home),
+                cwd=runtime_home,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise LLMError(
+                "antigravity_command_not_found", command=agy_command
+            ) from exc
+        if proc.returncode != 0:
+            raise LLMError(
+                "antigravity_models_failed",
+                detail=(proc.stderr or proc.stdout).strip()[-500:],
+            )
+        out = []
+        for line in proc.stdout.splitlines():
+            # Rows are "<model id>\t<display label>"; banner and error lines
+            # ("Fetching available models...", sign-in prompts) carry no tab.
+            if "\t" not in line:
+                continue
+            value, _, label = line.partition("\t")
+            value = value.strip()
+            if value:
+                out.append({"value": value, "label": label.strip() or value})
+        if not out:
+            raise LLMError("antigravity_models_empty")
+        return out
+
+
 class AntigravityCLIProvider:
     """LLM provider that shells out to Google Antigravity CLI (``agy``).
 
@@ -118,37 +208,10 @@ class AntigravityCLIProvider:
         return self.config.antigravity_api_key or os.environ.get("GEMINI_API_KEY", "")
 
     def _env(self, runtime_home: str) -> dict[str, str]:
-        """Build a minimal child environment without Mira service credentials."""
-        env = {key: value for key, value in os.environ.items() if key in _SAFE_ENV_KEYS}
-        env["HOME"] = runtime_home
-        api_key = self._gemini_api_key()
-        if api_key:
-            env["GEMINI_API_KEY"] = api_key
-        return env
+        return _child_env(self.config, runtime_home)
 
     def _prepare_gemini_home(self, runtime_home: str) -> None:
-        """Populate the ephemeral HOME's ``.gemini`` directory for one call.
-
-        With ``antigravity_home`` configured, its contents are trusted
-        operator state (settings.json, cached login credentials) and are
-        copied verbatim. With API-key auth, a minimal settings.json selecting
-        the Gemini provider is written unless the copied home already has one.
-        """
-        gemini_dir = Path(runtime_home) / ".gemini"
-        gemini_dir.mkdir(parents=True, mode=0o700)
-        source_home = self.config.antigravity_home
-        if source_home:
-            source = Path(source_home).expanduser()
-            if not source.is_dir():
-                raise LLMError("antigravity_home_missing", path=str(source))
-            shutil.copytree(source, gemini_dir, dirs_exist_ok=True)
-        if self._gemini_api_key():
-            settings_dir = gemini_dir / "antigravity-cli"
-            settings_dir.mkdir(exist_ok=True)
-            settings = settings_dir / "settings.json"
-            if not settings.exists():
-                settings.write_text(json.dumps({"modelProvider": "gemini"}))
-                settings.chmod(0o600)
+        _prepare_gemini_home(self.config, runtime_home)
 
     def _command(self) -> list[str]:
         agy_command = self.config.antigravity_command or "agy"
@@ -161,10 +224,16 @@ class AntigravityCLIProvider:
         if self.config.antigravity_sandbox:
             cmd.append("--sandbox")
         cmd.extend(["--print-timeout", f"{self.config.antigravity_timeout_seconds}s"])
+        effort = _EFFORT_MAP.get(self.config.reasoning_effort or "")
         if self.config.model not in _MODEL_SENTINELS:
             cmd.extend(["--model", self.config.model])
-        effort = _EFFORT_MAP.get(self.config.reasoning_effort or "")
-        if effort:
+        elif effort:
+            # --effort is only accepted when the CLI picks the model itself:
+            # explicit --model choices carry their reasoning level in the id
+            # (gemini-*-high/-medium/-low, "(Thinking)" Claude builds) and
+            # hard-error on the flag ("conflicts with --effort=…", "--effort
+            # is not supported for model …"). A stored effort must not turn
+            # every explicit-model call into an error, so it's simply skipped.
             cmd.extend(["--effort", effort])
         # The prompt is fed on stdin: with piped stdin and no --print value the
         # CLI runs a single headless turn. (--print only accepts the prompt as

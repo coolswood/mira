@@ -48,11 +48,32 @@ class TestBuildOptions:
 
     def test_codex_backend_only_offers_codex_models(self):
         values = [m["value"] for m in build_options("codex-cli", None, "review")]
-        assert values == ["codex-default"]
+        assert values == ["gpt-5.1-codex", "codex-default", "gpt-5.1-codex-mini"]
 
     def test_antigravity_backend_only_offers_antigravity_models(self):
         values = [m["value"] for m in build_options("antigravity-cli", None, "review")]
-        assert values == ["antigravity-default"]
+        # The curated fallback for when the live `agy models` fetch fails;
+        # recommended (the CLI default) sorts first.
+        assert values == [
+            "antigravity-default",
+            "gemini-3.1-pro-high",
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+        ]
+
+    def test_antigravity_live_catalog_merges_with_registry(self):
+        dynamic = [
+            {"value": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (Low)"},
+            {"value": "gpt-oss-120b-medium", "label": "GPT-OSS 120B (Medium)"},
+        ]
+        options = build_options("antigravity-cli", dynamic, "indexing")
+        values = [m["value"] for m in options]
+        # Registry entry wins over the live row (keeps the recommended badge);
+        # live-only models are appended.
+        assert "gemini-3.8-flash-low" in values
+        assert "gpt-oss-120b-medium" in values
+        assert values[0] == "antigravity-default"
+        assert options[0]["recommended"] is True
 
     def test_openrouter_does_not_offer_codex_models(self):
         values = [m["value"] for m in build_options("openrouter", None, "review")]
@@ -139,3 +160,36 @@ class TestFetchCatalog:
         key_a = f"bedrock:{a.region}:{a.aws_profile or ''}"
         key_b = f"bedrock:{b.region}:{b.aws_profile or ''}"
         assert key_a != key_b
+
+    @pytest.mark.asyncio
+    async def test_antigravity_live_catalog_is_cached(self, monkeypatch: pytest.MonkeyPatch):
+        calls = 0
+
+        def fake_list_models(config, timeout=30.0):
+            nonlocal calls
+            calls += 1
+            return [{"value": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (Low)"}]
+
+        monkeypatch.setattr("mira.llm.antigravity_cli.list_models", fake_list_models)
+        cfg = LLMConfig(provider="antigravity-cli")
+        expected = [{"value": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (Low)"}]
+        assert await fetch_catalog(cfg) == expected
+        assert await fetch_catalog(cfg) == expected
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_antigravity_fetch_failure_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from mira.exceptions import LLMError
+
+        def boom(config, timeout=30.0):
+            raise LLMError("antigravity_models_failed", detail="sign in")
+
+        monkeypatch.setattr("mira.llm.antigravity_cli.list_models", boom)
+        assert await fetch_catalog(LLMConfig(provider="antigravity-cli")) is None
+
+    @pytest.mark.asyncio
+    async def test_codex_has_no_live_catalog(self):
+        # Codex has no model-list subcommand; the registry serves its dropdown.
+        assert await fetch_catalog(LLMConfig(provider="codex-cli")) is None

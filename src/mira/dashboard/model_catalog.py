@@ -103,10 +103,14 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
     backend = active_backend(config)
     if backend == "bedrock":
         cache_key = f"bedrock:{config.region}:{config.aws_profile or ''}"
-    elif backend in {"codex-cli", "antigravity-cli"}:
-        # CLI backends have no HTTP model list; the bundled registry serves
-        # their dropdowns.
+    elif backend == "codex-cli":
+        # Codex has no model-list subcommand; the bundled registry serves
+        # its dropdown.
         return None
+    elif backend == "antigravity-cli":
+        # agy lists its models via `agy models` (auth-gated, same ephemeral
+        # HOME as a real call) — fetched off-loop like Bedrock.
+        cache_key = f"antigravity:{config.antigravity_home or ''}"
     else:
         cache_key = config.base_url
 
@@ -125,6 +129,10 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
         try:
             if backend == "bedrock":
                 models = await asyncio.to_thread(_fetch_bedrock_sync, config)
+            elif backend == "antigravity-cli":
+                from mira.llm.antigravity_cli import list_models
+
+                models = await asyncio.to_thread(list_models, config)
             elif backend == "openrouter":
                 models = await _fetch_openai_style(config, tools_only=True)
             else:
