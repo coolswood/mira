@@ -197,6 +197,16 @@ class TestAntigravityCLIProvider:
 
         assert list((runtime_home / ".gemini").iterdir()) == []
 
+    def test_messages_prompt_forbids_tool_use(self):
+        # agy is an agent: without an explicit tool ban it tries to run
+        # commands, headless denies them, and the turn ends with an empty
+        # response (observed on a real 200KB review prompt).
+        provider = AntigravityCLIProvider(LLMConfig(provider="antigravity-cli"))
+
+        prompt = provider._messages_prompt([{"role": "user", "content": "review this"}])
+
+        assert "Do not use tools" in prompt
+
     def test_extracts_fenced_json(self):
         provider = AntigravityCLIProvider(LLMConfig(provider="antigravity-cli"))
         assert provider._extract_json_object('Here you go:\n```json\n{"comments": []}\n```') == (
